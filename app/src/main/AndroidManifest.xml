@@ -29,5 +29,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Local on-device MCP analysis server" />
         </service>
+
+        <provider
+            android:name=".InjectProvider"
+            android:authorities="dev.dexmcp.inject"
+            android:exported="true"
+            android:grantUriPermissions="false"
+            android:label="Dex MCP startup injection" />
     </application>
 </manifest>

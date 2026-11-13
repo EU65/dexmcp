@@ -2,7 +2,9 @@
 
 一个在 Android 设备本机运行的 MCP 服务。面向同机运行的 Agent/LLM，提供系统信息、已安装包发现、受限 root 文件读取、APK/JAR/DEX 的 Smali 分析、内置 Frida 的动态分析，以及用 Miuix 重写的状态界面。
 
-当前版本是 `0.4.4`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+当前版本是 `0.4.5`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+
+0.4.5 增加 LSPosed 启动注入：勾选的应用在 `Application.onCreate` 之前自动让 Dex MCP 附加 Frida 并加载启动脚本，脚本就绪后应用继续启动。
 
 0.4.4 把内置 frida-inject 换成 Florida 风格的反检测补丁版（RPC 标记、agent/memfd 名、入口符号、线程名、helper dex 路径都改掉），首次使用会自动重装运行时。
 
@@ -54,6 +56,10 @@ Android Agent -> 127.0.0.1 Streamable HTTP -> Android App -> libsu / dexlib2
 - `android_frida_stop`
 - `android_frida_sessions`
 - `android_frida_restart_app`
+- `android_frida_agent_scripts`
+- `android_frida_agent_set`
+- `android_frida_agent_delete`
+- `android_frida_autostart`
 - `android_system_selinux`
 
 除动态分析外，工作区是只读的。系统源文件只会被读取并复制到 App 私有缓存，DEX/APK 解析在普通 App UID 进程进行，不在 root shell 中解析。
@@ -168,6 +174,54 @@ esbuild entry.js --bundle --format=iife --target=es2020 --minify --outfile=bridg
 ```
 
 产物放到 `app/src/main/assets/frida/bridge.js`。Frida 17 的 Java bridge 依赖 runtime 的 `Script`、`Process` 等全局对象，只能这样打包后随脚本注入，不能当普通 JS 模块直接跑。
+
+
+## 启动自动注入（LSPosed 模块）
+
+`xposed/` 是配套的 LSPosed 模块（包名 `dev.dexmcp.xposed`，APK 名 `DexMCP Hook`）。它不自己带 Frida，而是在勾选的应用启动时向 Dex MCP 要一次注入：
+
+1. 在 LSPosed 里启用模块，把要插桩的应用勾进作用域。
+2. 应用进程启动时，模块 hook `android.app.Instrumentation.callApplicationOnCreate`，也就是 `Application.onCreate()` 之前，在主线程上调用 Dex MCP 的 `content://dev.dexmcp.inject`（ContentProvider 的 `call()`），发送包名和 pid。
+3. Dex MCP 的 `InjectProvider` 校验 `/proc/<pid>/cmdline` 与包名一致、全局开关已打开、运行时已安装、`/data/adb/dexmcp/agents/<包名>.js` 存在，然后用内置 frida-inject 以 root 附加这个 pid 并加载脚本，等到脚本运行时发出就绪标记后再返回。
+4. 模块拿到返回结果，应用继续往下执行 `onCreate`，这时脚本里的 hook 已经装好。
+
+脚本用 MCP 工具管理（写入 `/data/adb/dexmcp/agents/<包名>.js`，root 私有）：
+
+```json
+{"name":"android_frida_agent_set","arguments":{
+  "package":"com.example.app",
+  "script":"Java.perform(function () {\n  console.log('startup hook ready');\n  var T = Java.use('com.example.app.Target');\n  T.check.implementation = function () { return true; };\n});"
+}}
+```
+
+```json
+{"name":"android_frida_agent_scripts","arguments":{}}
+```
+
+```json
+{"name":"android_frida_agent_delete","arguments":{"package":"com.example.app"}}
+```
+
+```json
+{"name":"android_frida_autostart","arguments":{"enabled":true}}
+```
+
+模块侧流程是"先脚本、后启动"：注入失败、Dex MCP 没运行、运行时没安装或没有对应脚本，模块都直接返回，应用照常启动（不会卡死）。代价是勾选的应用冷启动会多等注入时间，正常在 1–3 秒。
+
+几个实现细节：
+
+- 只在主进程注入（进程名等于包名）；`:remote` 之类的子进程不处理。
+- `android_frida_run` 自己重启应用时会登记 `manual_start`，模块此时不重复注入，避免两个 frida-inject 同时附加。
+- 走 Binder（ContentProvider `call`），目标应用不需要 INTERNET 权限，也不需要 root；真正有 root 的是 Dex MCP 调起的 frida-inject。Dex MCP 进程被系统回收时，provider 调用会自动拉起它（被用户强行停止的情况除外，那要重新打开一次 App）。
+- 接口没有权限保护（调用方是目标应用本身，拿不到 signature 权限）：任意应用都能调这个 provider，但服务端会核对 pid 对应的进程名，且只会加载 Dex MCP 自己存放的脚本，最多造成"某个有脚本的应用被重复注入"。个人使用够用，要收紧可以再加共享 token 校验。
+
+构建与安装：
+
+```powershell
+.\gradlew.bat :xposed:assembleRelease
+```
+
+产物是 `xposed/build/outputs/apk/release/xposed-release.apk`（约 2 MB，沿用本机 debug 签名）。装好后在 LSPosed 里启用并勾选目标应用，重启应用生效。主 App 的「Frida 动态分析」里新增「启动时自动注入」开关，关掉后所有请求直接返回 `disabled`。
 
 
 ## 触控笔诊断、系统文件发现和持久化对照
@@ -340,6 +394,7 @@ curl http://127.0.0.1:8765/mcp \
 - 动态分析需要 root，只支持 arm64-v8a，依赖内置的 Frida 17.26.2。目标加固、反调试或禁止 ptrace 时会附加失败，具体错误在会话日志里。
 - 若设备的策略数据库仍无法被 patch，只能用 `android_system_selinux` 临时切到 permissive（全局关闭 SELinux），用完必须恢复。
 - 会话最多保留 24 个，超出时最早停止的会话连同目录一起清理；单次 `android_frida_output` 最多返回 256 KiB。
+- 启动注入依赖 Dex MCP 前台服务常驻；服务被停掉、没装 LSPosed 模块或没勾选应用时不会注入。勾选应用的冷启动会多等注入完成（通常 1–3 秒），只在主进程注入，子进程不处理。
 - 主界面状态在进入时重新读取，不跨进程保存；会话清单和运行日志会持久化。Compose + Miuix 让 APK 比 0.3.x 大约 15 MB。
 
 这些限制不会影响第一版验证包发现、系统快照、DEX 搜索、Smali 读取和直接 xref 的主流程。

@@ -389,6 +389,14 @@ private fun FridaSection(state: MainState, scope: CoroutineScope, onUninstall: (
             }
         )
         HorizontalDivider()
+        BasicComponent(
+            title = "启动时自动注入",
+            summary = if (state.autostartEnabled) "LSPosed 勾选应用 · ${state.agentScripts} 个脚本" else "已关闭",
+            endActions = {
+                Switch(checked = state.autostartEnabled, onCheckedChange = { state.toggleAutostart(it) })
+            }
+        )
+        HorizontalDivider()
         Row(
             modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)

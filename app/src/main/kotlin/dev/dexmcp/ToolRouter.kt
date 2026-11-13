@@ -166,6 +166,17 @@ class ToolRouter(private val context: Context) {
                 "package" to stringSchema("Target package name"),
                 "wait_ms" to integerSchema("Milliseconds to wait for the process, 500-30000")
             ), listOf("package")),
+            tool("android_frida_agent_scripts", "List startup scripts used by the LSPosed hook: when a selected app launches, Dex MCP attaches Frida and loads /data/adb/dexmcp/agents/<package>.js before the app continues.", emptyMap()),
+            tool("android_frida_agent_set", "Create or replace the startup script for a package. The LSPosed hook injects it on the next launch of that app.", mapOf(
+                "package" to stringSchema("Target package name"),
+                "script" to stringSchema("JavaScript source, same API as android_frida_run")
+            ), listOf("package", "script")),
+            tool("android_frida_agent_delete", "Delete the startup script for a package.", mapOf(
+                "package" to stringSchema("Target package name")
+            ), listOf("package")),
+            tool("android_frida_autostart", "Read or change the global startup-injection switch used by the LSPosed hook.", mapOf(
+                "enabled" to booleanSchema("true to allow the hook to inject at app launch; omit to read the current value")
+            )),
             tool("android_system_selinux", "Read or change the device SELinux mode. Use permissive only as a temporary fallback when injection is blocked by policy and restore enforcing afterwards.", mapOf(
                 "state" to enumSchema("status", "permissive", "enforcing")
             ))
@@ -217,6 +228,20 @@ class ToolRouter(private val context: Context) {
                 "android_frida_stop" -> frida.stop(args)
                 "android_frida_sessions" -> frida.list()
                 "android_frida_restart_app" -> frida.restart(args)
+                "android_frida_agent_scripts" -> frida.listAgentScripts()
+                "android_frida_agent_set" -> frida.setAgentScript(
+                    args.getString("package").trim(),
+                    args.getString("script")
+                )
+                "android_frida_agent_delete" -> frida.deleteAgentScript(args.getString("package").trim())
+                "android_frida_autostart" -> {
+                    if (args.has("enabled")) {
+                        val enabled = args.getBoolean("enabled")
+                        ServerConfig.setAutostartEnabled(context, enabled)
+                        AppLog.info("设置：启动注入 ${if (enabled) "已启用" else "已关闭"}")
+                    }
+                    jsonObject("enabled" to ServerConfig.autostartEnabled(context))
+                }
                 "android_system_selinux" -> frida.selinux(args)
                 else -> error("Unknown tool: $name")
             }
@@ -246,6 +271,7 @@ class ToolRouter(private val context: Context) {
             ),
             "allow_any_file" to ServerConfig.allowAnyFile(context),
             "frida_enabled" to ServerConfig.fridaEnabled(context),
+            "frida_autostart" to ServerConfig.autostartEnabled(context),
             "read_allowlist" to jsonArray(if (ServerConfig.allowAnyFile(context)) listOf("/") else listOf(
                 "/system", "/system_ext", "/product", "/vendor", "/odm", "/apex", "/data/app",
                 "/data/adb/ksu/log", "/data/adb/lspd/log",

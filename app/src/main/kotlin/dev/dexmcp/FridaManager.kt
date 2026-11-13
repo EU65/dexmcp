@@ -28,6 +28,7 @@ class FridaManager private constructor(private val context: Context) {
          */
         const val RUNTIME_FLAVOR = "florida-1"
         const val BASE_DIR = "/data/adb/dexmcp"
+        const val AGENTS_DIR = "$BASE_DIR/agents"
         const val BINARY = "$BASE_DIR/frida-inject"
         const val SESSIONS_DIR = "$BASE_DIR/sessions"
         private const val ASSET = "frida/frida-inject"
@@ -113,7 +114,8 @@ class FridaManager private constructor(private val context: Context) {
                 });
               } catch (e) {}
             })();
-        """.trimIndent() + "\n"
+        """.trimIndent() + "\n" +
+            "try { send(['frida:stdout', '[dexmcp] ready\\n']); } catch (e) {}\n"
     }
 
     private val bridgeSource: String by lazy {
@@ -130,6 +132,14 @@ class FridaManager private constructor(private val context: Context) {
     private val launcherOutputs = HashMap<String, ByteArrayOutputStream>()
     private val sessions = LinkedHashMap<String, FridaSession>()
     private var loaded = false
+
+    /** Packages whose process was (re)started by an MCP tool a moment ago. */
+    private val manualStarts = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    fun isRecentlyStartedManually(pkg: String, windowMs: Long = 20_000): Boolean {
+        val at = manualStarts[pkg] ?: return false
+        return System.currentTimeMillis() - at < windowMs
+    }
 
     class FridaSession(
         val id: String,
@@ -160,6 +170,9 @@ class FridaManager private constructor(private val context: Context) {
             "installed_version" to installed,
             "binary" to BINARY,
             "base_dir" to BASE_DIR,
+            "agents_dir" to AGENTS_DIR,
+            "autostart_enabled" to ServerConfig.autostartEnabled(appContext),
+            "agent_script_count" to runCatching { agentScriptCount() }.getOrDefault(0),
             "session_count" to items.size,
             "sessions" to JSONArray(items)
         )
@@ -180,6 +193,7 @@ class FridaManager private constructor(private val context: Context) {
         )
     }
 
+    @Synchronized
     fun run(args: JSONObject): JSONObject {
         val pkg = args.optString("package").trim()
         require(pkg.isNotEmpty()) { "package is required" }
@@ -198,6 +212,7 @@ class FridaManager private constructor(private val context: Context) {
         ensureArm64()
         ensureInstalled(false)
         installedApp(pkg)
+        if (restart) manualStarts[pkg] = System.currentTimeMillis()
 
         val id = newId()
         val dir = "$SESSIONS_DIR/$id"
@@ -332,6 +347,7 @@ class FridaManager private constructor(private val context: Context) {
         ensureArm64()
         installedApp(pkg)
         val waitMs = args.optLong("wait_ms", 8_000).coerceIn(500, 30_000)
+        manualStarts[pkg] = System.currentTimeMillis()
         val pid = restartApp(pkg, waitMs)
         return jsonObject("package" to pkg, "pid" to pid, "restarted" to true)
     }
@@ -369,6 +385,145 @@ class FridaManager private constructor(private val context: Context) {
     private fun currentSelinuxMode(): String =
         RootRunner.run("getenforce 2>/dev/null || toybox cat /sys/fs/selinux/enforce 2>/dev/null", 15_000).text.trim()
 
+    // region startup injection (LSPosed hook)
+
+    private fun requirePackage(pkg: String) {
+        require(pkg.matches(Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$"))) {
+            "Invalid package name: $pkg"
+        }
+    }
+
+    fun listAgentScripts(): JSONObject {
+        requireRoot()
+        val result = RootRunner.run(
+            "for f in '$AGENTS_DIR'/*.js; do [ -f \"\$f\" ] || continue; " +
+                "toybox echo \"\${f##*/} \$(toybox wc -c < \"\$f\")\"; done",
+            20_000
+        )
+        val items = JSONArray()
+        for (line in result.text.lineSequence()) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) continue
+            val parts = trimmed.split(Regex("\\s+"), limit = 2)
+            val name = parts[0]
+            if (!name.endsWith(".js")) continue
+            items.put(
+                jsonObject(
+                    "package" to name.removeSuffix(".js"),
+                    "bytes" to (parts.getOrNull(1)?.toLongOrNull() ?: 0L)
+                )
+            )
+        }
+        return jsonObject("directory" to AGENTS_DIR, "items" to items, "count" to items.length())
+    }
+
+    fun agentScriptCount(): Int = listAgentScripts().optInt("count", 0)
+
+    fun hasAgentScript(pkg: String): Boolean = fileSize("$AGENTS_DIR/$pkg.js") != null
+
+    fun setAgentScript(pkg: String, script: String): JSONObject {
+        requireRoot()
+        requirePackage(pkg)
+        require(script.isNotBlank()) { "script is required" }
+        sh("mkdir -p '$AGENTS_DIR' && chmod 700 '$AGENTS_DIR'")
+        val path = "$AGENTS_DIR/$pkg.js"
+        writeFile(path, script)
+        sh("chmod 600 '$path'")
+        AppLog.info("Frida: 已写入启动脚本 $pkg（${script.toByteArray().size} 字节）")
+        return jsonObject("package" to pkg, "path" to path, "bytes" to script.toByteArray().size)
+    }
+
+    fun deleteAgentScript(pkg: String): JSONObject {
+        requireRoot()
+        requirePackage(pkg)
+        val result = RootRunner.run("rm -f '$AGENTS_DIR/$pkg.js'", 20_000)
+        check(result.exitCode == 0) { "Cannot delete script: ${result.stderr}" }
+        AppLog.info("Frida: 已删除启动脚本 $pkg")
+        return jsonObject("package" to pkg, "deleted" to true)
+    }
+
+    fun findLiveSession(pkg: String, pid: Int): FridaSession? {
+        loadIfNeeded()
+        val candidates = sessions.values.filter { !it.stopped && it.pid == pid && it.packageName == pkg }
+        return candidates.firstOrNull { session ->
+            val state = probe(session)
+            state.agentAlive || live[session.id]?.isAlive == true
+        }
+    }
+
+    fun isRuntimeReady(): Boolean = installedVersion() == VERSION && installedFlavor() == RUNTIME_FLAVOR
+
+    /**
+     * Attach to an already running process (used by the LSPosed startup hook while the
+     * app is paused) and wait until the script runtime reports that it is up.
+     */
+    @Synchronized
+    fun injectStartup(pkg: String, pid: Int, timeoutMs: Long = 6_000): JSONObject {
+        requirePackage(pkg)
+        require(pid > 0) { "pid is required" }
+        require(pkg != appContext.packageName) { "Cannot instrument Dex MCP itself" }
+        ensureArm64()
+        ensureInstalled(false)
+        val script = RootRunner.run("toybox cat '$AGENTS_DIR/$pkg.js' 2>/dev/null", 30_000).stdout
+        require(script.isNotEmpty()) { "No startup script for $pkg" }
+
+        // Only one main process per package can be alive; older startup sessions are stale.
+        retireSessions(pkg, pid)
+
+        val id = newId()
+        val dir = "$SESSIONS_DIR/$id"
+        sh("mkdir -p '$dir' && chmod 700 '$dir'")
+        val scriptName = "startup.js"
+        writeFile("$dir/$scriptName", composeScript(String(script, Charsets.UTF_8)))
+        sh("chmod 644 '$dir/$scriptName'")
+        val session = FridaSession(
+            id = id,
+            packageName = pkg,
+            pid = pid,
+            mode = "attach",
+            runtime = "qjs",
+            processName = "",
+            scriptName = scriptName,
+            dir = dir,
+            createdAt = now(),
+            updatedAt = now(),
+            stopped = false,
+            note = null
+        )
+        sessions[id] = session
+        persist()
+        launch(session, pid)
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var ready = false
+        while (System.currentTimeMillis() < deadline) {
+            val state = probe(session)
+            val chunk = readLog(session, 0, 65_536, state.logSize)
+            if (chunk.text.contains("dexmcp] ready")) {
+                ready = true
+                break
+            }
+            if (!state.agentAlive && live[id]?.isAlive != true) break
+            Thread.sleep(100)
+        }
+        session.updatedAt = now()
+        persist()
+        pruneSessions()
+        val state = probe(session)
+        val output = readLog(session, 0, 65_536, state.logSize).text
+        AppLog.info("Frida: 启动注入 $pkg pid=$pid · ${if (ready) "脚本已加载" else "未确认脚本加载"}")
+        return jsonObject(
+            "session_id" to id,
+            "package" to pkg,
+            "pid" to pid,
+            "ready" to ready,
+            "running" to state.agentAlive,
+            "log" to "$dir/output.log",
+            "output" to output.take(8_000)
+        )
+    }
+
+    // endregion
+
     fun uiStatus(): JSONObject {
         val root = RootRunner.isAvailable()
         var size = 0L
@@ -390,6 +545,8 @@ class FridaManager private constructor(private val context: Context) {
             "installed_version" to installed,
             "binary" to BINARY,
             "binary_bytes" to size,
+            "autostart_enabled" to ServerConfig.autostartEnabled(appContext),
+            "agent_scripts" to runCatching { agentScriptCount() }.getOrDefault(0),
             "sessions" to items.size,
             "running_sessions" to items.count { it.optBoolean("running") },
             "selinux" to selinux
@@ -578,6 +735,21 @@ class FridaManager private constructor(private val context: Context) {
         return sessions[id] ?: error("Unknown session_id: $id")
     }
 
+    /** Mark older startup sessions of a package as stopped before attaching to a new process. */
+    private fun retireSessions(pkg: String, keepPid: Int) {
+        var changed = false
+        for (session in sessions.values) {
+            if (!session.stopped && session.packageName == pkg &&
+                session.scriptName == "startup.js" && session.pid != keepPid
+            ) {
+                session.stopped = true
+                session.updatedAt = now()
+                changed = true
+            }
+        }
+        if (changed) persist()
+    }
+
     private fun pruneSessions() {
         if (sessions.size <= 24) return
         val removable = sessions.values.filter { it.stopped }.sortedBy { it.updatedAt }.take(sessions.size - 24)
@@ -730,7 +902,7 @@ class FridaManager private constructor(private val context: Context) {
 
     private fun install() {
         val prepared = RootRunner.run(
-            "mkdir -p '$BASE_DIR' '$SESSIONS_DIR' && chmod 700 '$BASE_DIR' '$SESSIONS_DIR' && " +
+            "mkdir -p '$BASE_DIR' '$SESSIONS_DIR' '$AGENTS_DIR' && chmod 700 '$BASE_DIR' '$SESSIONS_DIR' '$AGENTS_DIR' && " +
                 "rm -f '$BASE_DIR'/helper-*.dex",
             30_000
         )

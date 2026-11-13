@@ -36,6 +36,15 @@ object ServerConfig {
             .putBoolean("frida_enabled", enabled).apply()
     }
 
+    /** Whether the LSPosed startup hook may ask the service to inject a script at app launch. */
+    fun autostartEnabled(context: Context): Boolean =
+        context.getSharedPreferences("mcp", Context.MODE_PRIVATE).getBoolean("frida_autostart", true)
+
+    fun setAutostartEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences("mcp", Context.MODE_PRIVATE).edit()
+            .putBoolean("frida_autostart", enabled).apply()
+    }
+
     fun allowRemote(context: Context): Boolean =
         context.getSharedPreferences("mcp", Context.MODE_PRIVATE).getBoolean("allow_remote", false)
 

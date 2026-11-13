@@ -41,6 +41,8 @@ class MainState(private val context: Context) {
     var fridaRunningSessions by mutableStateOf(0)
     var fridaError by mutableStateOf<String?>(null)
     var fridaBusy by mutableStateOf<String?>(null)
+    var autostartEnabled by mutableStateOf(ServerConfig.autostartEnabled(context))
+    var agentScripts by mutableStateOf(0)
     var selinux by mutableStateOf("")
 
     var importSummary by mutableStateOf(summaryOfImports(context))
@@ -64,6 +66,8 @@ class MainState(private val context: Context) {
             fridaSize = status.optLong("binary_bytes")
             fridaSessions = status.optInt("sessions")
             fridaRunningSessions = status.optInt("running_sessions")
+            autostartEnabled = status.optBoolean("autostart_enabled", autostartEnabled)
+            agentScripts = status.optInt("agent_scripts", 0)
             selinux = status.optString("selinux")
             fridaError = null
         } catch (t: Throwable) {
@@ -109,6 +113,12 @@ class MainState(private val context: Context) {
             AppLog.warn("设置：MCP 侧 Frida 已禁用" + if (stopped > 0) "，已停止 $stopped 个会话" else "")
         }
         refreshFrida()
+    }
+
+    fun toggleAutostart(enabled: Boolean) {
+        autostartEnabled = enabled
+        ServerConfig.setAutostartEnabled(context, enabled)
+        AppLog.info("设置：启动注入 ${if (enabled) "已启用" else "已关闭"}")
     }
 
     suspend fun setSelinux(state: String) {
