@@ -2,7 +2,9 @@
 
 一个在 Android 设备本机运行的 MCP 服务。面向同机运行的 Agent/LLM，提供系统信息、已安装包发现、受限 root 文件读取、APK/JAR/DEX 的 Smali 分析、内置 Frida 的动态分析，以及用 Miuix 重写的状态界面。
 
-当前版本是 `0.4.3`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+当前版本是 `0.4.4`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+
+0.4.4 把内置 frida-inject 换成 Florida 风格的反检测补丁版（RPC 标记、agent/memfd 名、入口符号、线程名、helper dex 路径都改掉），首次使用会自动重装运行时。
 
 0.4.3 把 Frida 运行时目录从 `/data/local/tmp/dexmcp` 换到 `/data/adb/dexmcp`（root 私有，普通 App 枚举不到），升级后需要重新安装一次运行时；旧目录不会自动迁移。
 
@@ -104,9 +106,19 @@ SELinux 状态卡不再放在界面上，需要临时放宽时仍可通过 `andr
 日志记录 App 自身事件（服务启停、Frida 安装 / 注入 / 失败、SELinux 切换、导入结果），内存保留最新 600 条并追加到 `files/dexmcp.log`，重启后还能看到历史。主题跟随系统深色模式，界面为 edge-to-edge。
 
 
-## Frida 动态分析（内置 arm64 frida-inject 17.x）
+## Frida 动态分析（内置 arm64 frida-inject 17.x，Florida 风格补丁）
 
 APK 的 assets 里带 `frida-inject` 17.26.2（arm64）和预编译的 `frida-java-bridge` 7.0.13。首次调用时由 root shell 把 frida-inject 释放到 `/data/adb/dexmcp/frida-inject` 并校验 `--version`，之后复用；App 升级后版本号变化会自动重装。不需要 adb、不需要 frida-server，电脑端也不用装 frida 客户端。运行时目录放在 `/data/adb` 而不是 `/data/local/tmp`：`/data/adb` 是 root 私有的 700 目录，普通 App 枚举不到注入文件和会话日志，目标 App 也探测不到文件改动。
+
+内置的 frida-inject 不是官方原版，构建前用 `tools/patch-frida.py` 做了 Florida 风格的反检测替换（所有字符串等长，ELF 布局不变）：RPC 标记 `frida:rpc`、agent 名 `frida-agent-<arch>.so`（同时是 memfd 名，也就是目标进程 `/proc/<pid>/maps` 里可见的名字）、入口符号 `frida_agent_main`（连同 `.gnu.hash` / `.hash` 一起改，dlsym 仍能找到）、线程名 `gum-js-loop` / `gmain` / `gdbus`，agent 里的 `FridaScriptEngine`、`GLib-GIO`、`GDBusProxy`、`GumScript` 就地反转。另外 frida 原本会把 Java helper 释放到 `/data/local/tmp/frida-helper-<uuid>.dex`、把控制管道放在 `/data/local/tmp`，这里改成 `/data/adb/dexmcp/helper-<uuid>.dex` 和 `/data/adb`。运行时会记录 `/data/adb/dexmcp/flavor`，老的原版 17.26.2 会被判定为未安装，升级 App 后第一次用 Frida 会自动重装。
+
+这只是基础反检测：能过掉查 memfd 名、线程名、`frida:rpc`、`frida_agent_main` 这类常见特征，但 agent 内存里仍有大量 `Frida`/`frida` 类型名和错误信息字符串，主动扫描匿名映射里 `frida` 字样的检测仍可能命中。重新生成补丁版：
+
+```powershell
+curl -LO https://github.com/frida/frida/releases/download/17.26.2/frida-inject-17.26.2-android-arm64.xz
+xz -d frida-inject-17.26.2-android-arm64.xz
+python tools\patch-frida.py frida-inject
+```
 
 Frida 16.7.19 在 Android 17（SDK 37）上读不了内核策略数据库（`libsepol.avtab_read_item: more than one specifier` → `Unable to load SELinux policy from the kernel`），`frida_memfd` 标签注册失败，agent 落到 `unlabeled` 被目标域拒绝，最终报 `Agent connection closed`。17.26.2 的 libsepol 已跟进新格式，所以这里固定在 17.x。
 

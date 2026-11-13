@@ -21,6 +21,12 @@ import java.util.Locale
 class FridaManager private constructor(private val context: Context) {
     companion object {
         const val VERSION = "17.26.2"
+        /**
+         * The bundled frida-inject is patched by tools/patch-frida.py (Florida-style
+         * anti-detection). The flavor marker makes an existing stock 17.26.2 install
+         * look outdated, so it gets replaced on first use after an app update.
+         */
+        const val RUNTIME_FLAVOR = "florida-1"
         const val BASE_DIR = "/data/adb/dexmcp"
         const val BINARY = "$BASE_DIR/frida-inject"
         const val SESSIONS_DIR = "$BASE_DIR/sessions"
@@ -145,7 +151,7 @@ class FridaManager private constructor(private val context: Context) {
 
     fun status(): JSONObject {
         val root = RootRunner.isAvailable()
-        val installed = if (root) installedVersion() else null
+        val installed = if (root) installedVersion()?.takeIf { installedFlavor() == RUNTIME_FLAVOR } else null
         val items = sessionItems()
         return jsonObject(
             "root" to root,
@@ -372,7 +378,9 @@ class FridaManager private constructor(private val context: Context) {
             val probe = RootRunner.run(runtimeProbeCommand(), 30_000)
             val lines = probe.text.lines()
             size = lines.getOrNull(0)?.trim()?.toLongOrNull() ?: 0L
-            installed = lines.getOrNull(1)?.trim()?.takeIf { it.matches(Regex("\\d+(\\.\\d+){1,3}")) }
+            val version = lines.getOrNull(1)?.trim()?.takeIf { it.matches(Regex("\\d+(\\.\\d+){1,3}")) }
+            val flavor = lines.getOrNull(2)?.trim()
+            installed = if (version == VERSION && flavor == RUNTIME_FLAVOR) version else null
             selinux = currentSelinuxMode()
         }
         val items = sessionItems()
@@ -420,7 +428,8 @@ class FridaManager private constructor(private val context: Context) {
 
     private fun runtimeProbeCommand(): String =
         "if [ -f '$BINARY' ]; then toybox wc -c < '$BINARY' | toybox tr -d ' '; else toybox echo 0; fi; " +
-            "if [ -x '$BINARY' ]; then '$BINARY' --version 2>/dev/null; fi"
+            "if [ -x '$BINARY' ]; then '$BINARY' --version 2>/dev/null; fi; " +
+            "toybox cat '$BASE_DIR/flavor' 2>/dev/null"
 
     // region session internals
 
@@ -706,10 +715,7 @@ class FridaManager private constructor(private val context: Context) {
     private fun ensureInstalled(force: Boolean) {
         requireRoot()
         ensureArm64()
-        if (!force) {
-            val current = installedVersion()
-            if (current == VERSION) return
-        }
+        if (!force && installedVersion() == VERSION && installedFlavor() == RUNTIME_FLAVOR) return
         install()
     }
 
@@ -719,8 +725,15 @@ class FridaManager private constructor(private val context: Context) {
         return value.takeIf { it.matches(Regex("\\d+(\\.\\d+){1,3}")) }
     }
 
+    private fun installedFlavor(): String? =
+        RootRunner.run("toybox cat '$BASE_DIR/flavor' 2>/dev/null", 15_000).text.trim().takeIf { it.isNotEmpty() }
+
     private fun install() {
-        val prepared = RootRunner.run("mkdir -p '$BASE_DIR' '$SESSIONS_DIR' && chmod 700 '$BASE_DIR' '$SESSIONS_DIR'", 30_000)
+        val prepared = RootRunner.run(
+            "mkdir -p '$BASE_DIR' '$SESSIONS_DIR' && chmod 700 '$BASE_DIR' '$SESSIONS_DIR' && " +
+                "rm -f '$BASE_DIR'/helper-*.dex",
+            30_000
+        )
         check(prepared.exitCode == 0) { "Cannot create $BASE_DIR: ${prepared.stderr}" }
         val asset = try {
             appContext.assets.open(ASSET)
@@ -761,6 +774,7 @@ class FridaManager private constructor(private val context: Context) {
             error("frida-inject is not runnable: ${(checked.text + " " + checked.stderr).trim()}")
         }
         AppLog.info("Frida: 安装完成，$expected 字节")
+        RootRunner.run("printf '%s' '$RUNTIME_FLAVOR' > '$BASE_DIR/flavor'", 15_000)
     }
 
     private fun ensureArm64() {
