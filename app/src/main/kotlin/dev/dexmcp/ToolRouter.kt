@@ -31,7 +31,7 @@ class ToolRouter(private val context: Context) {
                 "cursor" to stringSchema("Cursor returned by the previous call"),
                 "limit" to integerSchema("Maximum results, 1-200")
             )),
-            tool("android_system_read_file", "Read a bounded byte range; allowed paths follow the App allow-any-file switch. Uses root when needed.", mapOf(
+            tool("android_system_read_file", "Read a bounded byte range; allowed paths follow the App allow-any-file switch. Uses root when needed. ZIP/ELF/PNG/DEX content is reported as is_binary instead of being decoded as text.", mapOf(
                 "path" to stringSchema("Absolute path (App path-access policy applies)"),
                 "offset" to integerSchema("Byte offset"),
                 "max_bytes" to integerSchema("Maximum bytes, capped at 65536"),
@@ -102,9 +102,13 @@ class ToolRouter(private val context: Context) {
             tool("android_analysis_close", "Close a workspace and delete its derived cache.", mapOf(
                 "workspace_id" to stringSchema("Workspace ID")
             ), listOf("workspace_id")),
-            tool("android_analysis_list", "List workspace artifacts, ZIP entries, DEX files, or DEX classes with cursor pagination.", mapOf(
+            tool("android_analysis_list", "List workspace artifacts, ZIP entries, DEX files, or DEX classes with cursor pagination. zip_entries and dex_classes accept query/regex/artifact_id filters.", mapOf(
                 "workspace_id" to stringSchema("Workspace ID"),
                 "kind" to enumSchema("artifacts", "zip_entries", "dex_files", "dex_classes"),
+                "query" to stringSchema("Filter on entry path or class descriptor"),
+                "regex" to booleanSchema("Interpret query as a regular expression"),
+                "ignore_case" to booleanSchema("Case-insensitive filter; default true"),
+                "artifact_id" to stringSchema("Only entries of this artifact"),
                 "cursor" to stringSchema("Opaque cursor returned by the previous call"),
                 "limit" to integerSchema("Page size, 1-200")
             ), listOf("workspace_id", "kind")),
@@ -112,25 +116,32 @@ class ToolRouter(private val context: Context) {
                 "workspace_id" to stringSchema("Workspace ID"),
                 "class" to stringSchema("Class descriptor, for example Landroid/foo/Bar;")
             ), listOf("workspace_id", "class")),
-            tool("android_analysis_search", "Search DEX class, method, field descriptors and string pools.", mapOf(
+            tool("android_analysis_search", "Search DEX class, method, field descriptors and string pools; supports regex, a class prefix scope and cross-kind dedupe.", mapOf(
                 "workspace_id" to stringSchema("Workspace ID"),
-                "query" to stringSchema("Literal substring"),
+                "query" to stringSchema("Literal substring, or regular expression with regex=true"),
+                "regex" to booleanSchema("Interpret query as a regular expression"),
+                "in_class_prefix" to stringSchema("Only classes whose descriptor starts with this prefix, for example Lcom/oplus/nfc/; with dex_string it scans strings referenced by those classes"),
+                "dedupe" to booleanSchema("Drop dex_string hits already covered by a class/method/field descriptor; default true"),
                 "kinds" to arraySchema(enumSchema("class", "method", "field", "dex_string")),
                 "ignore_case" to booleanSchema("Case-insensitive matching"),
                 "cursor" to stringSchema("Cursor"),
                 "limit" to integerSchema("Page size, 1-200")
             ), listOf("workspace_id", "query")),
-            tool("android_analysis_read", "Read decoded manifest, ZIP text, full class Smali, or one method Smali.", mapOf(
+            tool("android_analysis_read", "Read decoded manifest, ZIP text, class Smali, or method Smali with character pagination. Use ids for batch method/class reads.", mapOf(
                 "workspace_id" to stringSchema("Workspace ID"),
                 "type" to enumSchema("manifest", "zip_entry", "class", "method"),
                 "artifact_id" to stringSchema("Artifact ID for manifest or ZIP reads"),
                 "path" to stringSchema("ZIP entry path"),
                 "id" to stringSchema("Exact class or method descriptor"),
-                "max_chars" to integerSchema("Maximum returned characters")
+                "ids" to arraySchema(stringSchema("Batch: several class or method descriptors")),
+                "offset" to integerSchema("Character offset for pagination; use next_offset from the previous response"),
+                "no_bodies" to booleanSchema("type=class: only fields and method signatures"),
+                "max_chars" to integerSchema("Characters per page, default 16000, max 200000")
             ), listOf("workspace_id", "type")),
-            tool("android_analysis_xref_dex", "Find DEX instructions referencing an exact class, field, method or string target.", mapOf(
+            tool("android_analysis_xref_dex", "Find DEX instructions referencing a class, field, method or string. Method/field targets without a signature match every overload; context_instructions adds surrounding Smali.", mapOf(
                 "workspace_id" to stringSchema("Workspace ID"),
-                "target" to stringSchema("Exact DEX descriptor or referenced value"),
+                "target" to stringSchema("DEX descriptor; Lcom/x/Y;->playSound matches all overloads"),
+                "context_instructions" to integerSchema("Smali instructions before and after each hit, 0-64"),
                 "limit" to integerSchema("Maximum hits, 1-300")
             ), listOf("workspace_id", "target")),
             tool("android_frida_status", "Check root, the bundled frida-inject version and active dynamic-analysis sessions.", emptyMap()),
@@ -144,13 +155,16 @@ class ToolRouter(private val context: Context) {
                 "name" to stringSchema("Script filename inside the session; default hook.js"),
                 "mode" to enumSchema("attach", "spawn"),
                 "runtime" to enumSchema("qjs", "v8"),
-                "restart" to booleanSchema("Force-stop and relaunch the app first; default true"),
+                "restart" to booleanSchema("Force-stop and relaunch the app first; defaults to false for system/priv-app packages, true otherwise"),
                 "wait_ms" to integerSchema("Milliseconds to wait for load and first output, 300-30000")
             ), listOf("package", "script")),
             tool("android_frida_output", "Read new Frida console output since a byte offset. Pass next_offset from the previous response.", mapOf(
                 "session_id" to stringSchema("Session ID"),
                 "offset" to integerSchema("Byte offset; use next_offset from the previous call"),
                 "max_bytes" to integerSchema("Maximum new bytes, 1-262144")
+            ), listOf("session_id")),
+            tool("android_frida_clear_log", "Truncate a session log so the next android_frida_output starts from offset 0.", mapOf(
+                "session_id" to stringSchema("Session ID")
             ), listOf("session_id")),
             tool("android_frida_reload", "Optionally replace the session script, detach and re-attach without restarting the app. Falls back to a restart only when the target process is gone.", mapOf(
                 "session_id" to stringSchema("Session ID"),
@@ -224,6 +238,7 @@ class ToolRouter(private val context: Context) {
                 "android_frida_prepare" -> frida.prepare(args)
                 "android_frida_run" -> frida.run(args)
                 "android_frida_output" -> frida.output(args)
+                "android_frida_clear_log" -> frida.clearLog(args)
                 "android_frida_reload" -> frida.reload(args)
                 "android_frida_stop" -> frida.stop(args)
                 "android_frida_sessions" -> frida.list()
@@ -331,8 +346,23 @@ class ToolRouter(private val context: Context) {
     private fun readSystemFile(args: JSONObject): JSONObject {
         val path = args.getString("path")
         val offset = args.optLong("offset", 0).coerceAtLeast(0)
-        val bytes = root.read(path, offset, args.optInt("max_bytes", 32_768))
+        val requestedMax = args.optInt("max_bytes", 32_768)
+        val bytes = root.read(path, offset, requestedMax)
         val requested = args.optString("format", "auto")
+        val detected = if (offset == 0L) detectBinaryFormat(bytes) else null
+        val size = root.fileSize(path)
+
+        if (detected != null && (requested == "auto" || requested == "text")) {
+            return jsonObject(
+                "path" to path,
+                "is_binary" to true,
+                "detected_format" to detected,
+                "file_size" to size,
+                "offset" to offset,
+                "hint" to "Binary file, not decoded as text. Use format=hex for a dump, android_system_export_file to copy it, or android_analysis_open for APK/DEX."
+            )
+        }
+
         val format = if (requested == "auto") if (looksText(bytes)) "text" else "hex" else requested
         val content = when (format) {
             "text" -> bytes.toString(Charsets.UTF_8)
@@ -342,7 +372,30 @@ class ToolRouter(private val context: Context) {
             }.joinToString("\n")
             else -> error("Unsupported format: $format")
         }
-        return jsonObject("path" to path, "offset" to offset, "bytes_read" to bytes.size, "format" to format, "content" to content)
+        val nextOffset = if (size != null && offset + bytes.size < size) offset + bytes.size
+        else if (size == null && bytes.size >= requestedMax.coerceIn(1, 65_536)) offset + bytes.size
+        else null
+        return jsonObject(
+            "path" to path,
+            "offset" to offset,
+            "bytes_read" to bytes.size,
+            "file_size" to size,
+            "format" to format,
+            "truncated" to (nextOffset != null),
+            "next_offset" to nextOffset,
+            "content" to content
+        )
+    }
+
+    /** Returns "zip", "elf", "png", "gzip" or "dex" when the first bytes look like a known binary container. */
+    private fun detectBinaryFormat(bytes: ByteArray): String? {
+        fun at(index: Int): Int = if (index < bytes.size) bytes[index].toInt() and 0xff else -1
+        if (bytes.size >= 4 && at(0) == 0x50 && at(1) == 0x4b && (at(2) == 0x03 || at(2) == 0x05 || at(2) == 0x07)) return "zip"
+        if (bytes.size >= 4 && at(0) == 0x7f && at(1) == 0x45 && at(2) == 0x4c && at(3) == 0x46) return "elf"
+        if (bytes.size >= 8 && at(0) == 0x89 && at(1) == 0x50 && at(2) == 0x4e && at(3) == 0x47) return "png"
+        if (bytes.size >= 2 && at(0) == 0x1f && at(1) == 0x8b) return "gzip"
+        if (bytes.size >= 4 && at(0) == 0x64 && at(1) == 0x65 && at(2) == 0x78 && at(3) == 0x0a) return "dex"
+        return null
     }
 
     private fun openWorkspace(args: JSONObject): JSONObject {

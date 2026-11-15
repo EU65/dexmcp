@@ -1,6 +1,7 @@
 package dev.dexmcp
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
@@ -206,7 +207,7 @@ class FridaManager private constructor(private val context: Context) {
         require(runtime == "qjs" || runtime == "v8") { "runtime must be qjs or v8" }
         val processName = args.optString("process").trim()
         val scriptName = sanitizeScriptName(args.optString("name", "hook.js"))
-        val restart = args.optBoolean("restart", true)
+        val restart = if (args.has("restart")) args.optBoolean("restart") else !isSystemPackage(pkg)
         val waitMs = args.optLong("wait_ms", 2_500).coerceIn(300, 30_000)
 
         ensureArm64()
@@ -263,9 +264,18 @@ class FridaManager private constructor(private val context: Context) {
             val state = probe(session)
             val chunk = readLog(session, 0, 262_144, state.logSize)
             val result = describe(session, chunk, state)
-            if (chunk.text.contains("SELinux policy") || chunk.text.contains("unlabeled") ||
+            val selinuxFailure = chunk.text.contains("Unable to save SELinux policy") ||
+                chunk.text.contains("Unable to load SELinux policy") ||
+                chunk.text.contains("unlabeled") ||
                 chunk.text.contains("Agent connection closed")
-            ) {
+            if (selinuxFailure) {
+                result.put("error", "selinux_patch_failed")
+                result.put(
+                    "hint",
+                    "frida-inject could not patch the SELinux policy before attaching; this is an environment " +
+                        "problem, not a script error. Call android_system_selinux with state=permissive, then " +
+                        "android_frida_reload, and restore state=enforcing afterwards."
+                )
                 result.put(
                     "troubleshoot",
                     "SELinux policy patching failed. Call android_system_selinux with state=permissive, " +
@@ -288,6 +298,7 @@ class FridaManager private constructor(private val context: Context) {
 
     fun reload(args: JSONObject): JSONObject {
         val session = requireSession(args.optString("session_id"))
+        val before = probe(session).logSize
         args.optString("script").takeIf { it.isNotBlank() }?.let {
             writeFile("${session.dir}/${session.scriptName}", composeScript(it))
             sh("chmod 644 '${session.dir}/${session.scriptName}'")
@@ -310,7 +321,8 @@ class FridaManager private constructor(private val context: Context) {
         val state = probe(session)
         persist()
         AppLog.info("Frida: 已重新附加会话 ${session.id} pid=$pid")
-        return describe(session, readLog(session, 0, 262_144, state.logSize), state)
+        // Only the output produced by this reload; older lines stay behind the offset API.
+        return describe(session, readLog(session, before, 262_144, state.logSize), state)
     }
 
     fun stop(args: JSONObject): JSONObject {
@@ -333,6 +345,13 @@ class FridaManager private constructor(private val context: Context) {
         val state = probe(session)
         val start = if (offset > state.logSize) state.logSize else offset
         return describe(session, readLog(session, start, maxBytes, state.logSize), state)
+    }
+
+    fun clearLog(args: JSONObject): JSONObject {
+        val session = requireSession(args.optString("session_id"))
+        RootRunner.run(": > '${session.dir}/output.log'", 20_000)
+        AppLog.info("Frida: 已清空会话 ${session.id} 日志")
+        return jsonObject("session_id" to session.id, "cleared" to true, "log_bytes" to 0)
     }
 
     fun list(): JSONObject {
@@ -883,6 +902,12 @@ class FridaManager private constructor(private val context: Context) {
             error("Package $pkg is not installed or not visible: ${t.message ?: t.javaClass.simpleName}")
         }
     }
+
+    /** System / priv-app packages: restarting them by default can break device services. */
+    private fun isSystemPackage(pkg: String): Boolean = runCatching {
+        val info = appContext.packageManager.getApplicationInfo(pkg, 0)
+        (info.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0
+    }.getOrDefault(false)
 
     private fun ensureInstalled(force: Boolean) {
         requireRoot()

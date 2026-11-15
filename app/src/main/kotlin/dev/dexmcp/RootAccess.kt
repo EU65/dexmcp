@@ -89,6 +89,16 @@ class RootAccess(private val context: Context) {
         return bytes.copyOf(minOf(bytes.size, count))
     }
 
+    fun fileSize(path: String): Long? {
+        val source = validateSource(path)
+        if (canDirectRead(source)) return runCatching { source.length() }.getOrNull()
+        if (!rootShellAvailable()) return null
+        val result = Shell.cmd(
+            "toybox stat -c %s " + quote(source.path) + " 2>/dev/null || toybox wc -c < " + quote(source.path) + " 2>/dev/null"
+        ).exec()
+        return result.out.firstOrNull()?.trim()?.toLongOrNull()
+    }
+
     fun snapshot(profile: String): JSONObjectResult {
         val commands = when (profile) {
             "network" -> linkedMapOf(

@@ -2,7 +2,9 @@
 
 一个在 Android 设备本机运行的 MCP 服务。面向同机运行的 Agent/LLM，提供系统信息、已安装包发现、受限 root 文件读取、APK/JAR/DEX 的 Smali 分析、内置 Frida 的动态分析，以及用 Miuix 重写的状态界面。
 
-当前版本是 `0.4.5`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+当前版本是 `0.4.6`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+
+0.4.6 按实际使用反馈改了分析接口：方法/类读取分页（`offset` + `next_offset` + `size_chars`）、批量 `ids`、`no_bodies`，二进制文件自动识别、ZIP 条目过滤、搜索支持正则和类前缀作用域并默认去重，xref 可带回指令上下文、方法目标支持省略签名；Frida 侧 reload 只回增量日志、新增清空日志工具、系统应用默认不重启、SELinux patch 失败直接报 `selinux_patch_failed`。
 
 0.4.5 增加 LSPosed 启动注入：勾选的应用在 `Application.onCreate` 之前自动让 Dex MCP 附加 Frida 并加载启动脚本，脚本就绪后应用继续启动。
 
@@ -60,9 +62,12 @@ Android Agent -> 127.0.0.1 Streamable HTTP -> Android App -> libsu / dexlib2
 - `android_frida_agent_set`
 - `android_frida_agent_delete`
 - `android_frida_autostart`
+- `android_frida_clear_log`
 - `android_system_selinux`
 
 除动态分析外，工作区是只读的。系统源文件只会被读取并复制到 App 私有缓存，DEX/APK 解析在普通 App UID 进程进行，不在 root shell 中解析。
+
+DEX 读取默认分页：`android_analysis_read` 每页 16000 字符，响应带 `offset`、`next_offset`、`size_chars`、`complete`；`ids` 一次批量读多个方法/类（共用 `max_chars` 预算），`no_bodies` 让 `type=class` 只回字段和方法签名。`android_analysis_search` 支持 `regex`、`in_class_prefix`（配合 `dex_string` 时只扫该前缀下类引用到的字符串）和默认去重（字符串命中被同名描述符覆盖时丢弃）。`android_analysis_xref_dex` 的 `context_instructions` 会带上命中点前后各 N 条 smali，`Lcom/x/Y;->playSound` 这种不带签名的目标会匹配所有重载。`android_analysis_list` 的 `zip_entries` / `dex_classes` 支持 `query`（可配 `regex`）和 `artifact_id` 过滤。`android_system_read_file` 读到 ZIP/ELF/PNG/GZIP/DEX 时直接返回 `is_binary` + `detected_format` + `file_size`，不再把二进制解码成乱码；响应同时给出 `next_offset`。
 
 ## 构建与安装
 
@@ -157,11 +162,13 @@ Frida 17 起 runtime 不再内置 Java/ObjC bridge。会话脚本写入前会依
 - `restart=false`：不重启，直接附加当前进程；进程不存在时会自己启动一次 attach 会话。
 - `process`：可选，指定要附加的进程名（例如 `com.example.app:push`），默认是 app 主进程。
 - 脚本跑在 qjs 运行时，默认带 Java bridge 和 Module 兼容层；`console` 输出实时回传。
-- 换脚本不重启 app：`android_frida_reload` 写入新脚本后断开并重新附加；只有目标进程已消失时才按 `restart` 重启。
+- 换脚本不重启 app：`android_frida_reload` 写入新脚本后断开并重新附加；只有目标进程已消失时才按 `restart` 重启。响应里的 `output` 只含本次 reload 之后新产生的日志，历史用 `android_frida_output` 的 offset 读取。
 - 结束：`android_frida_stop`；`kill_app=true` 同时强制停止目标。
 - SELinux 策略补丁仍失败时（日志出现 `Unable to load SELinux policy` 或 `Agent connection closed`），先调用 `android_system_selinux` 的 `state=permissive`（即 `setenforce 0`），再 `android_frida_reload`；用完改回 `state=enforcing`。这会全局关闭 SELinux，直到恢复或重启，只作为临时兜底。
 
-其他工具：`android_frida_status`（root、已安装版本、会话）、`android_frida_prepare`（手动释放或 `force=true` 重装）、`android_frida_sessions`、`android_frida_restart_app`（只重启不注入）、`android_system_selinux`（`status`/`permissive`/`enforcing`）。失败时 `android_frida_run` 也会返回 `session_id` 和 `output`（可能带 `error` / `troubleshoot` 字段），frida-inject 的实际报错就在日志里，例如目标进程不存在、ptrace 被拒、脚本语法错误。
+其他工具：`android_frida_status`（root、已安装版本、会话）、`android_frida_prepare`（手动释放或 `force=true` 重装）、`android_frida_sessions`、`android_frida_restart_app`（只重启不注入）、`android_frida_clear_log`（清空会话日志，下次 `output` 从 0 开始）、`android_system_selinux`（`status`/`permissive`/`enforcing`）。失败时 `android_frida_run` 也会返回 `session_id` 和 `output`（可能带 `error` / `troubleshoot` 字段），frida-inject 的实际报错就在日志里，例如目标进程不存在、ptrace 被拒、脚本语法错误。脚本还没跑就出现 `Unable to save SELinux policy` / `Unable to load SELinux policy` / `unlabeled` 时，响应会带 `error: selinux_patch_failed`，这是环境问题，不要先去改脚本。
+
+`android_frida_run` 的 `restart` 现在按目标区分：system / priv-app 默认 `false`（避免默认 force-stop NFC、system_server 这类服务），普通应用默认 `true`；需要覆盖时显式传 `restart`。
 
 主界面的「允许 MCP 调用 Frida」开关关闭后，所有 `android_frida_*` 调用直接返回 `Frida is disabled in the App...`，并停止正在运行的会话；`android_system_get_summary` 的 `frida_enabled` 同步显示 `false`。开关只拦截 MCP，界面上的本地安装 / 卸载仍然可用。
 
