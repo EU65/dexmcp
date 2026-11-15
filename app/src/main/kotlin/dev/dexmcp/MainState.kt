@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,6 +29,7 @@ data class AgentApp(
 /** UI state and actions for the Miuix screen; all actions that touch root run on IO. */
 class MainState(private val context: Context) {
     private val frida = FridaManager.get(context)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     var screen by mutableStateOf(Screen.Main)
 
@@ -142,6 +145,7 @@ class MainState(private val context: Context) {
     suspend fun loadAgents() {
         if (agentsLoading) return
         agentsLoading = true
+        ScopeClient.refreshScope()
         try {
             val scripts = withContext(Dispatchers.IO) {
                 runCatching { frida.listAgentScripts() }.getOrNull()?.optJSONArray("items")
@@ -185,6 +189,26 @@ class MainState(private val context: Context) {
         agents = agents.map { if (it.packageName == pkg) it.copy(enabled = enabled) else it }
         agentEnabled = agents.count { it.enabled }
         AppLog.info("设置：启动注入 ${if (enabled) "已启用" else "已关闭"} $pkg")
+        if (!enabled) {
+            ScopeClient.removeScope(pkg)
+            return
+        }
+        if (!ScopeClient.connected.value) {
+            toast("LSPosed 服务未连接，请在 LSPosed 里手动勾选作用域")
+            return
+        }
+        if (pkg in ScopeClient.scope.value) return
+        ScopeClient.requestScope(pkg) { approved, message ->
+            mainHandler.post {
+                if (approved) {
+                    AppLog.info("LSPosed：已授权作用域 $pkg")
+                    toast("LSPosed 已授权 $pkg")
+                } else {
+                    AppLog.warn("LSPosed：作用域申请失败 $pkg - ${message ?: "unknown"}")
+                    toast("作用域申请失败：${message ?: "未知错误"}")
+                }
+            }
+        }
     }
 
     fun openScript(pkg: String) {

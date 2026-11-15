@@ -8,19 +8,11 @@
 
     <application
         android:allowBackup="false"
+        android:name=".DexMcpApp"
         android:label="Dex MCP"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="true">
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="Dex MCP 同时是 LSPosed 启动注入模块：勾选的应用在 Application.onCreate 之前按 Dex MCP 里的配置注入 Frida 脚本，注入完成后应用继续启动。" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="93" />
 
         <activity
             android:name=".MainActivity"

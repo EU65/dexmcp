@@ -12,8 +12,8 @@ android {
         applicationId = "dev.dexmcp"
         minSdk = 28
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.4.7"
+        versionCode = 16
+        versionName = "0.4.8"
     }
 
     buildTypes {
@@ -43,8 +43,10 @@ kotlin {
 }
 
 dependencies {
-    // Classic Xposed API stubs; LSPosed provides the real classes at runtime.
-    compileOnly(project(":xposed-api"))
+    // Modern Xposed API 102: compile-time only, LSPosed provides it in target processes.
+    compileOnly("io.github.libxposed:api:102.0.0")
+    // Framework service used by the module app to request scope dynamically.
+    implementation("io.github.libxposed:service:102.0.0")
 
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.1")

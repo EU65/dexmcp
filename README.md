@@ -2,7 +2,9 @@
 
 一个在 Android 设备本机运行的 MCP 服务。面向同机运行的 Agent/LLM，提供系统信息、已安装包发现、受限 root 文件读取、APK/JAR/DEX 的 Smali 分析、内置 Frida 的动态分析，以及用 Miuix 重写的状态界面。
 
-当前版本是 `0.4.7`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+当前版本是 `0.4.8`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+
+0.4.8 把模块迁到现代 Xposed API 102（`META-INF/xposed/*`、`module.prop`），并通过 `io.github.libxposed:service` 在 App 内动态申请作用域：打开某个应用的开关后向 LSPosed 请求该包，用户在 LSPosed 通知里确认即可，关闭开关时撤销作用域。
 
 0.4.7 把 LSPosed 模块并进 Dex MCP 本体：同一个 APK 既是 MCP 服务端也是启动注入模块，不再有单独的 `dev.dexmcp.xposed`；主界面新增「启动注入」页面，可以按应用开关、查看和直接编辑每个应用的启动脚本。
 
@@ -89,6 +91,14 @@ $env:PATH="$env:JAVA_HOME\bin;$env:PATH"
 ```
 
 界面用 Compose + Miuix（`top.yukonga.miuix.kmp` 0.8.8，对应 Compose 1.10 / Kotlin 2.3.20），它会把 `androidx.navigationevent` 带进来，所以 `compileSdk` 必须是 36、AGP 不低于 8.9.1。
+
+现代 Xposed API（`io.github.libxposed:api:102.0.0` 和 `service:102.0.0`）的 AAR 声明需要 compileSdk 37；本机的 SDK 只有 `platforms/android-37.0`（Android 17 的“37.0”平台名），AGP 8.9.1 解析不了这个带小版本号的路径，所以 `gradle.properties` 里关掉了 AAR 的 compileSdk 检查：
+
+```properties
+android.experimental.disableCompileSdkChecks=true
+```
+
+代码只用到 API 36 及以下的符号，编译和运行都不依赖 SDK 37；以后升级到支持 37.0 的 AGP 后可以去掉这个开关并把 `compileSdk` 提到 37。
 
 安装后打开 App。它会启动前台服务，并显示：
 
@@ -189,9 +199,9 @@ esbuild entry.js --bundle --format=iife --target=es2020 --minify --outfile=bridg
 
 ## 启动自动注入（Dex MCP 同时是 LSPosed 模块）
 
-Dex MCP 本体就是 LSPosed 模块（APK 里带 `xposed_init`，包名仍然是 `dev.dexmcp`），不再有单独的 `dev.dexmcp.xposed`。它不自己带 Frida 注入能力，而是在应用启动时让 Dex MCP 的 root 进程做一次附加：
+Dex MCP 本体就是 LSPosed 模块（现代 Xposed API 102，包名仍然是 `dev.dexmcp`），不再有单独的 `dev.dexmcp.xposed`。它不自己带 Frida 注入能力，而是在应用启动时让 Dex MCP 的 root 进程做一次附加：
 
-1. 在 LSPosed 里启用「Dex MCP」，把要插桩的应用勾进作用域（LSPosed 作用域决定 hook 会被加载到哪些应用）。
+1. 在 LSPosed 里启用「Dex MCP」。作用域不用手动勾：在 Dex MCP 的「启动注入」页面打开某个应用的开关时，App 会通过 `io.github.libxposed.service` 的 `requestScope()` 申请该包，LSPosed 弹出通知/确认，用户同意后自动加进作用域；关掉开关时会 `removeScope()`。
 2. 在主界面「启动注入」页面里给应用打开开关、写脚本（脚本存在 `/data/adb/dexmcp/agents/<包名>.js`）。总开关关闭或应用开关关闭时不会注入。
 3. 应用进程启动时，模块 hook `android.app.Instrumentation.callApplicationOnCreate`，也就是 `Application.onCreate()` 之前，在主线程上调用 Dex MCP 的 `content://dev.dexmcp.inject`（ContentProvider 的 `call()`），发送包名和 pid。
 4. Dex MCP 的 `InjectProvider` 校验 `/proc/<pid>/cmdline` 与包名一致、总开关和应用开关都打开、运行时已安装、脚本存在，然后用内置 frida-inject 以 root 附加这个 pid 并加载脚本，等到脚本运行时发出就绪标记后再返回。
@@ -199,12 +209,15 @@ Dex MCP 本体就是 LSPosed 模块（APK 里带 `xposed_init`，包名仍然是
 
 合并成一个 APK 之后不需要再装第二个模块应用，也没有跨应用的模块通信要维护；但**运行时仍然要经过一次 provider 调用**：hook 跑在目标应用进程（普通 UID，没有 root），真正执行 `frida-inject` 的是 Dex MCP 的进程，这一步无法省掉。
 
+按现代 API 的约定，模块 APK 用 `META-INF/xposed/java_init.list` 声明入口类、`META-INF/xposed/module.prop` 声明 `minApiVersion`/`targetApiVersion`（都是 102），不再使用 `assets/xposed_init` 和 `xposedmodule` 等旧元数据。需要 LSPosed 支持现代 Xposed API 102；旧版 LSPosed 会把 Dex MCP 当成普通应用，不会加载模块。
+
 界面上的「启动注入」页面：
 
-- 顶部是总开关，下面是可搜索的应用列表（应用名 + 包名）。
-- 每一行有开关和一个脚本状态（`没有脚本` / `脚本 1.2 KB`），点行进入脚本编辑页。
-- 脚本编辑页是一块等宽文本编辑区，可以直接改，底部「保存并启用」写文件并打开该应用开关，「删除脚本」删除文件并关闭开关。
-- 还没有脚本的应用打开编辑器时会带一段默认模板（`Java.perform(function () { ... });`）。
+- 顶部一张 LSPosed 状态卡：已连接时会显示“打开开关自动申请作用域”，未连接时提示先到 LSPosed 里启用模块。
+- 总开关，下面是可搜索的应用列表（应用名 + 包名）。
+- 每一行有开关和一个脚本状态（`没有脚本` / `脚本 1.2 KB`）；已启用但还没拿到作用域的行会标注 `未授权作用域`。
+- 点行进入脚本编辑页：等宽文本编辑区，可直接改，底部「保存并启用」写文件并打开该应用开关，「删除脚本」删除文件并关闭开关；没有脚本时打开会带默认模板（`Java.perform(function () { ... });`）。
+- 作用域申请结果（`approved` / 失败原因）会写进运行日志并 toast；申请失败时应用开关仍然保持打开，只是会在列表里显示未授权，方便稍后重试。
 
 脚本同样可以用 MCP 工具管理：
 
@@ -241,7 +254,7 @@ Dex MCP 本体就是 LSPosed 模块（APK 里带 `xposed_init`，包名仍然是
 - LSPosed 作用域和 Dex MCP 里的应用开关是两层：作用域没勾的应用连 hook 都不会加载；作用域勾了但开关没开的应用每次启动只多一次 provider 调用（返回 `disabled`），不会注入。
 - provider 没有权限保护（调用方是目标应用本身，拿不到 signature 权限）：任意应用都能调，但服务端会核对 pid 对应的进程名、检查开关，且只会加载 Dex MCP 自己存放的脚本。
 
-升级说明：0.4.7 起不再需要旧的 `dev.dexmcp.xposed` 模块，可以直接卸载；在 LSPosed 里改用「Dex MCP」并重新勾选作用域。
+升级说明：0.4.7 起不再需要旧的 `dev.dexmcp.xposed` 模块，可以直接卸载；在 LSPosed 里改用「Dex MCP」。0.4.8 起作用域在 App 内申请：打开应用开关时如果没有作用域会自动向 LSPosed 请求；之前已经打开但没作用域的应用，把开关关掉再打开即可重新申请。
 
 
 ## 触控笔诊断、系统文件发现和持久化对照

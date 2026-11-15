@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -23,12 +24,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.dexmcp.AgentApp
 import dev.dexmcp.MainState
-import dev.dexmcp.Screen
+import dev.dexmcp.ScopeClient
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Button
@@ -51,6 +51,8 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 @Composable
 fun AgentsScreen(state: MainState, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val xposedConnected by ScopeClient.connected.collectAsState()
+    val xposedScope by ScopeClient.scope.collectAsState()
     BackHandler { onBack() }
     LaunchedEffect(Unit) { state.loadAgents() }
     val query = state.agentQuery.trim()
@@ -93,6 +95,7 @@ fun AgentsScreen(state: MainState, onBack: () -> Unit) {
                     label = "搜索应用名或包名"
                 )
             }
+            item { FrameworkCard(xposedConnected) }
             item { MasterCard(state) }
             if (state.agentsLoading) {
                 item {
@@ -114,8 +117,24 @@ fun AgentsScreen(state: MainState, onBack: () -> Unit) {
                     )
                 }
             }
-            items(filtered, key = { it.packageName }) { app -> AgentRow(state, app, scope) }
+            items(filtered, key = { it.packageName }) { app ->
+                AgentRow(state, app, app.packageName in xposedScope)
+            }
         }
+    }
+}
+
+@Composable
+private fun FrameworkCard(connected: Boolean) {
+    Card {
+        BasicComponent(
+            title = "LSPosed",
+            summary = if (connected) {
+                "已连接 · 打开应用开关时会自动申请作用域，LSPosed 会弹出确认"
+            } else {
+                "未连接 · 请先在 LSPosed 里启用 Dex MCP；未连接时需要在 LSPosed 里手动勾选作用域"
+            }
+        )
     }
 }
 
@@ -136,12 +155,13 @@ private fun MasterCard(state: MainState) {
 private fun AgentRow(
     state: MainState,
     app: AgentApp,
-    scope: kotlinx.coroutines.CoroutineScope
+    inScope: Boolean
 ) {
     val summary = buildString {
         append(app.packageName)
         append(" · ")
         append(if (app.scriptBytes > 0) "脚本 ${MainState.formatBytes(app.scriptBytes)}" else "没有脚本")
+        if (app.enabled && !inScope) append(" · 未授权作用域")
     }
     Card {
         BasicComponent(
