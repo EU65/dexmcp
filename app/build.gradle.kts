@@ -12,8 +12,8 @@ android {
         applicationId = "dev.dexmcp"
         minSdk = 28
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.4.6"
+        versionCode = 15
+        versionName = "0.4.7"
     }
 
     buildTypes {
@@ -43,6 +43,9 @@ kotlin {
 }
 
 dependencies {
+    // Classic Xposed API stubs; LSPosed provides the real classes at runtime.
+    compileOnly(project(":xposed-api"))
+
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

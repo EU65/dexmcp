@@ -173,6 +173,7 @@ class FridaManager private constructor(private val context: Context) {
             "base_dir" to BASE_DIR,
             "agents_dir" to AGENTS_DIR,
             "autostart_enabled" to ServerConfig.autostartEnabled(appContext),
+            "agent_enabled" to AgentStore.count(appContext),
             "agent_script_count" to runCatching { agentScriptCount() }.getOrDefault(0),
             "session_count" to items.size,
             "sessions" to JSONArray(items)
@@ -414,31 +415,60 @@ class FridaManager private constructor(private val context: Context) {
 
     fun listAgentScripts(): JSONObject {
         requireRoot()
+        val enabled = AgentStore.enabledPackages(appContext)
         val result = RootRunner.run(
             "for f in '$AGENTS_DIR'/*.js; do [ -f \"\$f\" ] || continue; " +
                 "toybox echo \"\${f##*/} \$(toybox wc -c < \"\$f\")\"; done",
             20_000
         )
         val items = JSONArray()
+        val seen = HashSet<String>()
         for (line in result.text.lineSequence()) {
             val trimmed = line.trim()
             if (trimmed.isEmpty()) continue
             val parts = trimmed.split(Regex("\\s+"), limit = 2)
             val name = parts[0]
             if (!name.endsWith(".js")) continue
+            val pkg = name.removeSuffix(".js")
+            seen += pkg
             items.put(
                 jsonObject(
-                    "package" to name.removeSuffix(".js"),
-                    "bytes" to (parts.getOrNull(1)?.toLongOrNull() ?: 0L)
+                    "package" to pkg,
+                    "bytes" to (parts.getOrNull(1)?.toLongOrNull() ?: 0L),
+                    "enabled" to (pkg in enabled)
                 )
             )
+        }
+        for (pkg in enabled) {
+            if (pkg !in seen) items.put(jsonObject("package" to pkg, "bytes" to 0L, "enabled" to true))
         }
         return jsonObject("directory" to AGENTS_DIR, "items" to items, "count" to items.length())
     }
 
     fun agentScriptCount(): Int = listAgentScripts().optInt("count", 0)
 
+    fun agentEnabledCount(): Int = AgentStore.count(appContext)
+
     fun hasAgentScript(pkg: String): Boolean = fileSize("$AGENTS_DIR/$pkg.js") != null
+
+    fun readAgentScript(pkg: String): String? {
+        requirePackage(pkg)
+        val result = RootRunner.run("toybox cat '$AGENTS_DIR/$pkg.js' 2>/dev/null", 30_000)
+        if (result.exitCode != 0) return null
+        val text = String(result.stdout, Charsets.UTF_8)
+        return text.takeIf { it.isNotEmpty() }
+    }
+
+    fun setAgentEnabled(pkg: String, enabled: Boolean): JSONObject {
+        requirePackage(pkg)
+        AgentStore.setEnabled(appContext, pkg, enabled)
+        AppLog.info("Frida: 启动注入 ${if (enabled) "已启用" else "已关闭"} $pkg")
+        return jsonObject(
+            "package" to pkg,
+            "enabled" to enabled,
+            "has_script" to hasAgentScript(pkg)
+        )
+    }
 
     fun setAgentScript(pkg: String, script: String): JSONObject {
         requireRoot()
@@ -448,8 +478,9 @@ class FridaManager private constructor(private val context: Context) {
         val path = "$AGENTS_DIR/$pkg.js"
         writeFile(path, script)
         sh("chmod 600 '$path'")
+        AgentStore.setEnabled(appContext, pkg, true)
         AppLog.info("Frida: 已写入启动脚本 $pkg（${script.toByteArray().size} 字节）")
-        return jsonObject("package" to pkg, "path" to path, "bytes" to script.toByteArray().size)
+        return jsonObject("package" to pkg, "path" to path, "bytes" to script.toByteArray().size, "enabled" to true)
     }
 
     fun deleteAgentScript(pkg: String): JSONObject {
@@ -457,8 +488,9 @@ class FridaManager private constructor(private val context: Context) {
         requirePackage(pkg)
         val result = RootRunner.run("rm -f '$AGENTS_DIR/$pkg.js'", 20_000)
         check(result.exitCode == 0) { "Cannot delete script: ${result.stderr}" }
+        AgentStore.setEnabled(appContext, pkg, false)
         AppLog.info("Frida: 已删除启动脚本 $pkg")
-        return jsonObject("package" to pkg, "deleted" to true)
+        return jsonObject("package" to pkg, "deleted" to true, "enabled" to false)
     }
 
     fun findLiveSession(pkg: String, pid: Int): FridaSession? {
@@ -565,6 +597,7 @@ class FridaManager private constructor(private val context: Context) {
             "binary" to BINARY,
             "binary_bytes" to size,
             "autostart_enabled" to ServerConfig.autostartEnabled(appContext),
+            "agent_enabled" to AgentStore.count(appContext),
             "agent_scripts" to runCatching { agentScriptCount() }.getOrDefault(0),
             "sessions" to items.size,
             "running_sessions" to items.count { it.optBoolean("running") },

@@ -181,13 +181,17 @@ class ToolRouter(private val context: Context) {
                 "wait_ms" to integerSchema("Milliseconds to wait for the process, 500-30000")
             ), listOf("package")),
             tool("android_frida_agent_scripts", "List startup scripts used by the LSPosed hook: when a selected app launches, Dex MCP attaches Frida and loads /data/adb/dexmcp/agents/<package>.js before the app continues.", emptyMap()),
-            tool("android_frida_agent_set", "Create or replace the startup script for a package. The LSPosed hook injects it on the next launch of that app.", mapOf(
+            tool("android_frida_agent_set", "Create or replace the startup script for a package and enable it. The LSPosed hook injects it on the next launch of that app.", mapOf(
                 "package" to stringSchema("Target package name"),
                 "script" to stringSchema("JavaScript source, same API as android_frida_run")
             ), listOf("package", "script")),
-            tool("android_frida_agent_delete", "Delete the startup script for a package.", mapOf(
+            tool("android_frida_agent_delete", "Delete the startup script for a package and turn its startup injection off.", mapOf(
                 "package" to stringSchema("Target package name")
             ), listOf("package")),
+            tool("android_frida_agent_enable", "Turn startup injection on or off for a package without touching its script.", mapOf(
+                "package" to stringSchema("Target package name"),
+                "enabled" to booleanSchema("true to inject this package's startup script on launch")
+            ), listOf("package", "enabled")),
             tool("android_frida_autostart", "Read or change the global startup-injection switch used by the LSPosed hook.", mapOf(
                 "enabled" to booleanSchema("true to allow the hook to inject at app launch; omit to read the current value")
             )),
@@ -249,6 +253,10 @@ class ToolRouter(private val context: Context) {
                     args.getString("script")
                 )
                 "android_frida_agent_delete" -> frida.deleteAgentScript(args.getString("package").trim())
+                "android_frida_agent_enable" -> frida.setAgentEnabled(
+                    args.getString("package").trim(),
+                    args.getBoolean("enabled")
+                )
                 "android_frida_autostart" -> {
                     if (args.has("enabled")) {
                         val enabled = args.getBoolean("enabled")

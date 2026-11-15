@@ -68,6 +68,9 @@ class InjectProvider : ContentProvider() {
         if (!frida.isRuntimeReady()) {
             return fail("not_installed", "Install the Frida runtime in Dex MCP first")
         }
+        if (!AgentStore.isEnabled(context, pkg)) {
+            return fail("disabled", "Startup injection is off for $pkg")
+        }
         if (!frida.hasAgentScript(pkg)) return fail("no_script", "No startup script for $pkg")
 
         val result = frida.injectStartup(pkg, pid)

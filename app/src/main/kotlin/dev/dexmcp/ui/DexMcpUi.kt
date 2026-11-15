@@ -106,6 +106,8 @@ fun DexMcpApp(state: MainState) {
         when (state.screen) {
             Screen.Main -> MainScreen(state, pickFile)
             Screen.Logs -> LogScreen(onBack = { state.screen = Screen.Main })
+            Screen.Agents -> AgentsScreen(state, onBack = { state.screen = Screen.Main })
+            Screen.Script -> ScriptScreen(state, onBack = { state.screen = Screen.Agents })
         }
     }
 }
@@ -142,6 +144,7 @@ private fun MainScreen(state: MainState, pickFile: () -> Unit) {
             item { StatusSection(state) }
             item { ServiceSection(state, scope, onEditPort = { editPort = true }) }
             item { FridaSection(state, scope, onUninstall = { confirmUninstall = true }) }
+            item { AgentSection(state) }
             item { AnalysisSection(state, pickFile) }
             item { LogSection(state) }
             item { Footer() }
@@ -425,6 +428,24 @@ private fun FridaSection(state: MainState, scope: CoroutineScope, onUninstall: (
         }
         state.fridaBusy?.let { NoteText(it, colors.onSurfaceVariantSummary) }
         state.fridaError?.let { NoteText(it, colors.error) }
+    }
+}
+
+@Composable
+private fun AgentSection(state: MainState) {
+    val summary = when {
+        !state.autostartEnabled -> "总开关已关闭"
+        state.agentEnabled > 0 -> "已启用 ${state.agentEnabled} 个应用"
+        else -> "未启用任何应用"
+    }
+    SectionTitle("启动注入")
+    Card {
+        BasicComponent(
+            title = "应用与脚本",
+            summary = summary,
+            endActions = { Icon(MiuixIcons.Basic.ArrowRight, null, Modifier.size(20.dp)) },
+            onClick = { state.screen = Screen.Agents }
+        )
     }
 }
 

@@ -1,4 +1,4 @@
-package dev.dexmcp.xposed
+package dev.dexmcp
 
 import android.app.Application
 import android.net.Uri
@@ -11,19 +11,24 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 
 /**
- * LSPosed entry point.
+ * LSPosed entry point. Dex MCP is both the MCP server and the LSPosed module, so the
+ * hook ships in the same APK as the management UI.
  *
- * LSPosed only loads this module into apps selected in its scope. For the main process
- * of each such app we hook `Instrumentation.callApplicationOnCreate`, i.e. right before
- * `Application.onCreate()`, ask Dex MCP to run the startup script, and only then let the
- * app continue. If Dex MCP is not reachable, has no script for the package, or does not
- * answer in time, the app starts normally.
+ * LSPosed only loads this class into apps selected in its scope. For the main process of
+ * each such app we hook `Instrumentation.callApplicationOnCreate`, i.e. right before
+ * `Application.onCreate()`, ask the Dex MCP process to attach Frida with the configured
+ * startup script, and only then let the app continue. If Dex MCP has no script for the
+ * package, startup injection is disabled, or the runtime is missing, the app starts
+ * normally.
+ *
+ * Keep this class self-contained: it is loaded inside third-party apps and must not pull
+ * in Compose, the MCP server or any other Dex MCP component.
  */
-class Hook : IXposedHookLoadPackage {
+class StartupHook : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         val pkg = lpparam.packageName ?: return
-        if (pkg == "android" || pkg == SELF_PACKAGE || pkg == MCP_PACKAGE) return
+        if (pkg == "android" || pkg == MCP_PACKAGE) return
         if (!lpparam.isFirstApplication) return
         if (lpparam.processName != pkg) return
         val classLoader = lpparam.classLoader ?: return
@@ -63,7 +68,6 @@ class Hook : IXposedHookLoadPackage {
     companion object {
         private const val INJECT_URI = "content://dev.dexmcp.inject"
         private const val METHOD_INJECT = "inject"
-        private const val SELF_PACKAGE = "dev.dexmcp.xposed"
         private const val MCP_PACKAGE = "dev.dexmcp"
     }
 }

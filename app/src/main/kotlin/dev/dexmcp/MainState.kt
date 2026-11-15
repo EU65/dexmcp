@@ -14,7 +14,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-enum class Screen { Main, Logs }
+enum class Screen { Main, Logs, Agents, Script }
+
+/** One installed app in the startup-injection list. */
+data class AgentApp(
+    val packageName: String,
+    val label: String,
+    val enabled: Boolean,
+    val scriptBytes: Long
+)
 
 /** UI state and actions for the Miuix screen; all actions that touch root run on IO. */
 class MainState(private val context: Context) {
@@ -43,7 +51,16 @@ class MainState(private val context: Context) {
     var fridaBusy by mutableStateOf<String?>(null)
     var autostartEnabled by mutableStateOf(ServerConfig.autostartEnabled(context))
     var agentScripts by mutableStateOf(0)
+    var agentEnabled by mutableStateOf(0)
     var selinux by mutableStateOf("")
+
+    var agents by mutableStateOf<List<AgentApp>>(emptyList())
+    var agentsLoading by mutableStateOf(false)
+    var agentQuery by mutableStateOf("")
+    var editingPackage by mutableStateOf<String?>(null)
+    var scriptText by mutableStateOf("")
+    var scriptLoading by mutableStateOf(false)
+    var scriptDirty by mutableStateOf(false)
 
     var importSummary by mutableStateOf(summaryOfImports(context))
 
@@ -68,6 +85,7 @@ class MainState(private val context: Context) {
             fridaRunningSessions = status.optInt("running_sessions")
             autostartEnabled = status.optBoolean("autostart_enabled", autostartEnabled)
             agentScripts = status.optInt("agent_scripts", 0)
+            agentEnabled = status.optInt("agent_enabled", 0)
             selinux = status.optString("selinux")
             fridaError = null
         } catch (t: Throwable) {
@@ -119,6 +137,112 @@ class MainState(private val context: Context) {
         autostartEnabled = enabled
         ServerConfig.setAutostartEnabled(context, enabled)
         AppLog.info("设置：启动注入 ${if (enabled) "已启用" else "已关闭"}")
+    }
+
+    suspend fun loadAgents() {
+        if (agentsLoading) return
+        agentsLoading = true
+        try {
+            val scripts = withContext(Dispatchers.IO) {
+                runCatching { frida.listAgentScripts() }.getOrNull()?.optJSONArray("items")
+            }
+            val sizes = HashMap<String, Long>()
+            if (scripts != null) {
+                for (index in 0 until scripts.length()) {
+                    val item = scripts.optJSONObject(index) ?: continue
+                    sizes[item.optString("package")] = item.optLong("bytes")
+                }
+            }
+            val enabled = AgentStore.enabledPackages(context)
+            val pm = context.packageManager
+            val apps = withContext(Dispatchers.IO) {
+                pm.getInstalledApplications(0)
+                    .asSequence()
+                    .filter { it.packageName != context.packageName }
+                    .map { info ->
+                        AgentApp(
+                            packageName = info.packageName,
+                            label = runCatching { pm.getApplicationLabel(info).toString() }
+                                .getOrDefault(info.packageName),
+                            enabled = info.packageName in enabled,
+                            scriptBytes = sizes[info.packageName] ?: 0L
+                        )
+                    }
+                    .sortedBy { it.label.lowercase() }
+                    .toList()
+            }
+            agents = apps
+            agentEnabled = apps.count { it.enabled }
+        } catch (t: Throwable) {
+            AppLog.error("启动注入：读取应用列表失败 ${t.message ?: t.javaClass.simpleName}")
+        } finally {
+            agentsLoading = false
+        }
+    }
+
+    fun toggleAgent(pkg: String, enabled: Boolean) {
+        AgentStore.setEnabled(context, pkg, enabled)
+        agents = agents.map { if (it.packageName == pkg) it.copy(enabled = enabled) else it }
+        agentEnabled = agents.count { it.enabled }
+        AppLog.info("设置：启动注入 ${if (enabled) "已启用" else "已关闭"} $pkg")
+    }
+
+    fun openScript(pkg: String) {
+        editingPackage = pkg
+        scriptText = ""
+        scriptDirty = false
+        scriptLoading = true
+        screen = Screen.Script
+    }
+
+    suspend fun loadScript() {
+        val pkg = editingPackage ?: return
+        scriptLoading = true
+        val text = withContext(Dispatchers.IO) { runCatching { frida.readAgentScript(pkg) }.getOrNull() }
+        scriptText = text ?: DEFAULT_AGENT_SCRIPT
+        scriptDirty = text == null
+        scriptLoading = false
+    }
+
+    suspend fun saveScript() {
+        val pkg = editingPackage ?: return
+        val script = scriptText
+        if (script.isBlank()) {
+            toast("脚本不能为空")
+            return
+        }
+        try {
+            withContext(Dispatchers.IO) { frida.setAgentScript(pkg, script) }
+            val bytes = script.toByteArray().size.toLong()
+            agents = agents.map {
+                if (it.packageName == pkg) it.copy(enabled = true, scriptBytes = bytes) else it
+            }
+            agentEnabled = agents.count { it.enabled }
+            agentScripts = agents.count { it.scriptBytes > 0 }
+            scriptDirty = false
+            AppLog.info("启动注入：已保存 $pkg 的脚本（${bytes} 字节）")
+            toast("已保存并启用")
+        } catch (t: Throwable) {
+            AppLog.error("启动注入：保存 $pkg 失败 ${t.message ?: t.javaClass.simpleName}")
+            toast("保存失败：${t.message}")
+        }
+    }
+
+    suspend fun deleteScript() {
+        val pkg = editingPackage ?: return
+        try {
+            withContext(Dispatchers.IO) { frida.deleteAgentScript(pkg) }
+            agents = agents.map {
+                if (it.packageName == pkg) it.copy(enabled = false, scriptBytes = 0L) else it
+            }
+            agentEnabled = agents.count { it.enabled }
+            agentScripts = agents.count { it.scriptBytes > 0 }
+            scriptText = ""
+            scriptDirty = false
+            toast("已删除脚本")
+        } catch (t: Throwable) {
+            toast("删除失败：${t.message}")
+        }
     }
 
     suspend fun setSelinux(state: String) {
@@ -202,6 +326,9 @@ class MainState(private val context: Context) {
     }
 
     companion object {
+        const val DEFAULT_AGENT_SCRIPT = """Java.perform(function () {
+  console.log('[startup] script loaded');
+});"""
         fun summaryOfImports(context: Context): String {
             val files = ImportStore(context).list()
             return if (files.isEmpty()) "尚未导入文件" else "已导入 ${files.size} 个文件；最近：${files.first().name}"

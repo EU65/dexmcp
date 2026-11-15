@@ -17,5 +17,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "AndroidDexMcp"
 include(":app")
-include(":xposed")
 include(":xposed-api")
