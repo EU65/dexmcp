@@ -12,8 +12,8 @@ android {
         applicationId = "dev.dexmcp"
         minSdk = 28
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.4.8"
+        versionCode = 17
+        versionName = "0.4.9"
     }
 
     buildTypes {
@@ -56,6 +56,7 @@ dependencies {
     implementation("top.yukonga.miuix.kmp:miuix-icons:0.8.8")
 
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+    testImplementation("junit:junit:4.13.2")
     implementation("com.github.topjohnwu.libsu:core:6.0.0")
 
     implementation("com.android.tools.smali:smali-dexlib2:3.0.10")

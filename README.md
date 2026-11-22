@@ -2,7 +2,9 @@
 
 一个在 Android 设备本机运行的 MCP 服务。面向同机运行的 Agent/LLM，提供系统信息、已安装包发现、受限 root 文件读取、APK/JAR/DEX 的 Smali 分析、内置 Frida 的动态分析，以及用 Miuix 重写的状态界面。
 
-当前版本是 `0.4.8`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+当前版本是 `0.4.9`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+
+0.4.9 修了 MCP 传输层：支持现代协议 2026-07-28（`server/discover`、`resultType`、`ttlMs`/`cacheScope`、无 `initialize` 握手），并按 `Transfer-Encoding: chunked` 读取请求体。之前 chunked 请求的 body 会被读不完整，残留内容拼到下一个请求行，客户端收到 `BAD REQUEST: Syntax error. HTTP verb ... POST unhandled.`
 
 0.4.8 把模块迁到现代 Xposed API 102（`META-INF/xposed/*`、`module.prop`），并通过 `io.github.libxposed:service` 在 App 内动态申请作用域：打开某个应用的开关后向 LSPosed 请求该包，用户在 LSPosed 通知里确认即可，关闭开关时撤销作用域。
 
@@ -316,6 +318,24 @@ Markdown 报告通过 MCP 返回 `content`，agent 可保存成自己的文件�
   "name": "android_analysis_open",
   "arguments": { "import_id": "文件的 import_id" }
 }
+```
+
+## MCP 协议版本
+
+服务端同时支持两代协议，按请求里的 `_meta` / `MCP-Protocol-Version` 判断：
+
+- 现代（2026-07-28 及以后）：无 `initialize` 握手，每个请求在 `_meta` 里带版本和客户端能力。实现了 `server/discover`，返回 `supportedVersions`、`capabilities`、`_meta["io.modelcontextprotocol/serverInfo"]`、`instructions`、`ttlMs`、`cacheScope`；所有结果带 `resultType: "complete"`，`tools/list` 带 `ttlMs` / `cacheScope`。
+- 旧版（2025-11-25 及更早）：`initialize` 握手，返回协商后的 `protocolVersion`、capabilities 和 serverInfo。
+
+请求声明了不支持的版本时返回 JSON-RPC `-32022`（`UnsupportedProtocolVersionError`），`data.supported` 列出支持的版本，客户端可以降级重试。HTTP 请求体按 `Content-Length` 或 `Transfer-Encoding: chunked` 读取；chunked 之前会被 NanoHTTPD 读不完整，剩下半个 body 留在 socket 里，下一个请求行变成 `{"jsonrpc":...}POST`，服务端就报 `BAD REQUEST: Syntax error. HTTP verb ... unhandled.`。
+
+`server/discover` 示例：
+
+```bash
+curl http://127.0.0.1:8765/mcp \
+  -H 'Authorization: Bearer YOUR_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}'
 ```
 
 ## MCP 请求示例
