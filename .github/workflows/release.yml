@@ -52,7 +52,23 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build release APK
-        run: ./gradlew :app:assembleRelease --no-daemon --console=plain
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleRelease --no-daemon --console=plain 2>&1 | tee build.log
+
+      - name: Report build failure
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          path = pathlib.Path('build.log')
+          if not path.exists():
+              print('::error::build.log missing')
+              raise SystemExit(0)
+          lines = path.read_text(errors='replace').splitlines()[-80:]
+          message = '%0A'.join(line.replace('%', '%25') for line in lines if line.strip())
+          print(f'::error::{message}')
+          PY
 
       - name: Resolve version and rename APK
         id: meta
