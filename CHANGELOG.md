@@ -1,12 +1,13 @@
 # 更新记录
 
-## 未发布
+## 0.4.12
 
 - 默认允许读取 `/data/adb`、`/mnt/opex`、`/mnt/oplus`、`/mnt/vendor` 和 `/system_dlkm`，方便诊断 KernelSU 模块和厂商组件。
 - 默认允许设备级 `/proc`、`/sys` 和 ART 的 DEX 缓存目录，继续限制进程和用户数据路径。
 - 默认允许读取 OPPO / ColorOS 的 `my_*` 系统分区，支持分析其中的预装 APK。
 - 增加 HTTP 二进制流式下载和断点续传，支持单独导出 APK / ZIP 条目。
 - 受保护文件通过单个 root 进程流式读取，由 App 写缓存。
+- 文档拆分到 `docs/`，界面滚动和日志分享一并调整。
 
 ## 0.4.11
 

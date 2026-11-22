@@ -31,8 +31,8 @@ android {
         applicationId = "dev.dexmcp"
         minSdk = 28
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.4.11"
+        versionCode = 20
+        versionName = "0.4.12"
     }
 
     signingConfigs {
