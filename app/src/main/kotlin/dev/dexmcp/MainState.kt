@@ -39,7 +39,7 @@ class MainState(private val context: Context) {
     var serviceError by mutableStateOf(McpService.lastError)
     var allowRemote by mutableStateOf(ServerConfig.allowRemote(context))
     var allowAnyFile by mutableStateOf(ServerConfig.allowAnyFile(context))
-    var remoteUrls by mutableStateOf(ServerConfig.remoteUrls(context))
+    var remoteUrls by mutableStateOf<List<String>>(emptyList())
     val token: String = ServerConfig.token(context)
     var port by mutableStateOf(ServerConfig.port(context))
 
@@ -65,15 +65,23 @@ class MainState(private val context: Context) {
     var scriptLoading by mutableStateOf(false)
     var scriptDirty by mutableStateOf(false)
 
-    var importSummary by mutableStateOf(summaryOfImports(context))
+    var importSummary by mutableStateOf("尚未导入文件")
 
-    fun refreshService(refreshUrls: Boolean = false) {
+    fun refreshService() {
         serviceRunning = McpService.running
         boundHost = McpService.boundHost
         boundPort = McpService.boundPort
         serviceError = McpService.lastError
         port = ServerConfig.port(context)
-        if (refreshUrls) remoteUrls = ServerConfig.remoteUrls(context)
+    }
+
+    suspend fun refreshRemoteUrls() {
+        if (!allowRemote) {
+            remoteUrls = emptyList()
+            return
+        }
+        val urls = withContext(Dispatchers.IO) { ServerConfig.remoteUrls(context) }
+        remoteUrls = urls
     }
 
     suspend fun refreshFrida() {
@@ -284,7 +292,7 @@ class MainState(private val context: Context) {
         allowRemote = enabled
         ServerConfig.setAllowRemote(context, enabled)
         startService()
-        remoteUrls = ServerConfig.remoteUrls(context)
+        remoteUrls = emptyList()
         AppLog.info("设置：局域网 / 公网连接 ${if (enabled) "已允许" else "已关闭"}")
     }
 
@@ -299,10 +307,10 @@ class MainState(private val context: Context) {
         val wasRunning = McpService.running
         port = newPort
         ServerConfig.setPort(context, newPort)
-        remoteUrls = ServerConfig.remoteUrls(context)
+        remoteUrls = emptyList()
         AppLog.info("设置：端口改为 $newPort" + if (wasRunning) "，正在重新监听" else "")
         if (wasRunning) startService()
-        refreshService(refreshUrls = true)
+        refreshService()
     }
 
     fun startService() {
@@ -320,7 +328,7 @@ class MainState(private val context: Context) {
     suspend fun importFile(uri: Uri) {
         try {
             val file = withContext(Dispatchers.IO) { ImportStore(context).import(uri) }
-            importSummary = summaryOfImports(context)
+            refreshImportSummary()
             AppLog.info("导入：${file.name}（${formatBytes(file.size)}），import_id ${file.id}")
             toast("导入成功：${file.name}")
         } catch (t: Throwable) {
@@ -345,8 +353,8 @@ class MainState(private val context: Context) {
         runCatching { Toast.makeText(context, message, Toast.LENGTH_SHORT).show() }
     }
 
-    fun refreshImportSummary() {
-        importSummary = summaryOfImports(context)
+    suspend fun refreshImportSummary() {
+        importSummary = withContext(Dispatchers.IO) { summaryOfImports(context) }
     }
 
     companion object {

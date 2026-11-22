@@ -1,20 +1,32 @@
 package dev.dexmcp.ui
 
+import android.content.ClipData
+import android.content.Intent
+import android.widget.Toast
+import androidx.core.content.FileProvider
+
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -45,9 +57,12 @@ import dev.dexmcp.BuildConfig
 import dev.dexmcp.FridaManager
 import dev.dexmcp.MainState
 import dev.dexmcp.Screen
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -56,7 +71,6 @@ import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Scaffold
-import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
@@ -68,6 +82,7 @@ import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.Copy
 import top.yukonga.miuix.kmp.icon.extended.Delete
 import top.yukonga.miuix.kmp.icon.extended.Refresh
+import top.yukonga.miuix.kmp.icon.extended.Share
 import top.yukonga.miuix.kmp.theme.Colors
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.darkColorScheme
@@ -116,38 +131,36 @@ fun DexMcpApp(state: MainState) {
 private fun MainScreen(state: MainState, pickFile: () -> Unit) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
-        var ticks = 0
         while (true) {
-            state.refreshService(refreshUrls = ticks % 5 == 0)
-            ticks++
+            state.refreshService()
             delay(1000)
         }
     }
-    LaunchedEffect(Unit) {
-        state.refreshFrida()
-        state.refreshImportSummary()
+    LaunchedEffect(state.allowRemote, state.port) {
+        state.refreshRemoteUrls()
+        while (state.allowRemote) {
+            delay(5000)
+            state.refreshRemoteUrls()
+        }
     }
+    LaunchedEffect(Unit) { state.refreshFrida() }
+    LaunchedEffect(Unit) { state.refreshImportSummary() }
     var confirmUninstall by remember { mutableStateOf(false) }
     var editPort by remember { mutableStateOf(false) }
 
-    Scaffold(topBar = { SmallTopAppBar(title = "Dex MCP") }) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = padding.calculateTopPadding() + 8.dp,
-                bottom = padding.calculateBottomPadding() + 28.dp
-            ),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+    Scaffold(topBar = { HomeTopBar() }) { padding ->
+        Column(
+            modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
+                .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            item { StatusSection(state) }
-            item { ServiceSection(state, scope, onEditPort = { editPort = true }) }
-            item { FridaSection(state, scope, onUninstall = { confirmUninstall = true }) }
-            item { AgentSection(state) }
-            item { AnalysisSection(state, pickFile) }
-            item { LogSection(state) }
-            item { Footer() }
+            StatusSection(state)
+            Column { ServiceSection(state, onEditPort = { editPort = true }) }
+            Column { FridaSection(state, scope, onUninstall = { confirmUninstall = true }) }
+            Column { AgentSection(state) }
+            Column { AnalysisSection(state, pickFile) }
+            Column { LogSection(state) }
+            Footer()
         }
     }
 
@@ -177,6 +190,17 @@ private fun MainScreen(state: MainState, pickFile: () -> Unit) {
 }
 
 @Composable
+private fun HomeTopBar() {
+    Box(
+        modifier = Modifier.fillMaxWidth().statusBarsPadding().heightIn(min = 48.dp)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Text("Dex MCP", style = MiuixTheme.textStyles.title2, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
 private fun StatusSection(state: MainState) {
     val colors = MiuixTheme.colorScheme
     val port = state.boundPort ?: state.port
@@ -188,8 +212,8 @@ private fun StatusSection(state: MainState) {
     }
     val frida = fridaStatus(state, colors)
     Row(
-        modifier = Modifier.fillMaxWidth().height(150.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         StatusBlock(
             modifier = Modifier.weight(1f).fillMaxHeight(),
@@ -228,9 +252,9 @@ private fun StatusBlock(
             Spacer(Modifier.weight(1f))
             Box(Modifier.size(8.dp).background(color, CircleShape))
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(6.dp))
         Text(value, style = MiuixTheme.textStyles.title2, fontWeight = FontWeight.SemiBold, color = color)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
         lines.forEach { line ->
             Text(
                 line,
@@ -275,14 +299,14 @@ private fun fridaStatus(state: MainState, colors: Colors): StatusInfo {
 }
 
 @Composable
-private fun ServiceSection(state: MainState, scope: CoroutineScope, onEditPort: () -> Unit) {
+private fun ServiceSection(state: MainState, onEditPort: () -> Unit) {
     val colors = MiuixTheme.colorScheme
     val address = if (state.allowRemote) {
         state.remoteUrls.firstOrNull() ?: "http://<平板 IP>:${state.port}/mcp"
     } else {
         "http://127.0.0.1:${state.port}/mcp"
     }
-    SectionTitle("服务")
+    SectionHeader("服务")
     Card {
         BasicComponent(
             title = "监听端口",
@@ -308,7 +332,7 @@ private fun ServiceSection(state: MainState, scope: CoroutineScope, onEditPort: 
         HorizontalDivider()
         BasicComponent(
             title = "认证 Token",
-            summary = state.token,
+            summary = "点击右侧复制",
             endActions = {
                 IconButton(onClick = { state.copy("Token", state.token) }) {
                     Icon(MiuixIcons.Copy, "复制 Token", Modifier.size(20.dp))
@@ -329,13 +353,11 @@ private fun ServiceSection(state: MainState, scope: CoroutineScope, onEditPort: 
                 Switch(checked = state.allowAnyFile, onCheckedChange = { state.toggleAnyFile(it) })
             }
         )
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        CardActions {
             Button(
                 onClick = { state.startService() },
                 modifier = Modifier.weight(1f),
+                enabled = !state.serviceRunning,
                 colors = ButtonDefaults.buttonColorsPrimary()
             ) { Text("启动服务") }
             Button(
@@ -400,10 +422,7 @@ private fun FridaSection(state: MainState, scope: CoroutineScope, onUninstall: (
             }
         )
         HorizontalDivider()
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        CardActions {
             Button(
                 onClick = { scope.launch { state.installFrida(force = installed != null) } },
                 modifier = Modifier.weight(1f),
@@ -438,7 +457,7 @@ private fun AgentSection(state: MainState) {
         state.agentEnabled > 0 -> "已启用 ${state.agentEnabled} 个应用"
         else -> "未启用任何应用"
     }
-    SectionTitle("启动注入")
+    SectionHeader("启动注入")
     Card {
         BasicComponent(
             title = "应用与脚本",
@@ -451,7 +470,7 @@ private fun AgentSection(state: MainState) {
 
 @Composable
 private fun AnalysisSection(state: MainState, pickFile: () -> Unit) {
-    SectionTitle("静态分析")
+    SectionHeader("静态分析")
     Card {
         BasicComponent(
             title = "导入 APK / JAR / DEX",
@@ -466,7 +485,7 @@ private fun AnalysisSection(state: MainState, pickFile: () -> Unit) {
 private fun LogSection(state: MainState) {
     val logs by AppLog.entries.collectAsState()
     val last = logs.lastOrNull()
-    SectionTitle("日志")
+    SectionHeader("日志")
     Card {
         BasicComponent(
             title = "运行日志",
@@ -491,9 +510,15 @@ private fun Footer() {
 private fun LogScreen(onBack: () -> Unit) {
     val entries by AppLog.entries.collectAsState()
     val context = LocalContext.current
-    val listState = rememberLazyListState()
-    LaunchedEffect(entries.size) {
-        if (entries.isNotEmpty()) listState.animateScrollToItem(entries.lastIndex)
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = entries.lastIndex.coerceAtLeast(0))
+    var previousTail by remember { mutableStateOf<Long?>(null) }
+    val tail = entries.lastOrNull()?.id
+    LaunchedEffect(tail) {
+        val follow = previousTail == null || (!listState.isScrollInProgress &&
+            listState.layoutInfo.visibleItemsInfo.any { it.key == previousTail || it.key == tail })
+        previousTail = tail
+        if (follow && entries.isNotEmpty()) listState.scrollToItem(entries.lastIndex)
     }
     androidx.activity.compose.BackHandler { onBack() }
     Scaffold(
@@ -506,6 +531,29 @@ private fun LogScreen(onBack: () -> Unit) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        scope.launch {
+                            try {
+                                val snapshot = withContext(Dispatchers.IO) { AppLog.shareSnapshot(context) }
+                                if (snapshot == null) {
+                                    Toast.makeText(context, "暂无日志可分享", Toast.LENGTH_SHORT).show()
+                                    return@launch
+                                }
+                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.logfiles", snapshot)
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    clipData = ClipData.newUri(context.contentResolver, "Dex MCP 日志", uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(send, "分享日志文件"))
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                Toast.makeText(context, "分享日志失败", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }) { Icon(MiuixIcons.Share, "分享日志文件", Modifier.size(20.dp)) }
                     IconButton(onClick = {
                         val text = entries.joinToString("\n") { "${formatTime(it.time)} ${it.level.name} ${it.message}" }
                         runCatching {
@@ -540,7 +588,7 @@ private fun LogScreen(onBack: () -> Unit) {
                     )
                 }
             }
-            items(entries) { entry -> LogRow(entry) }
+            items(entries, key = { it.id }) { entry -> LogRow(entry) }
         }
     }
 }
@@ -556,7 +604,7 @@ private fun LogRow(entry: AppLog.Entry) {
     Card(insideMargin = PaddingValues(horizontal = 14.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                formatTime(entry.time),
+                remember(entry.time) { formatTime(entry.time) },
                 style = MiuixTheme.textStyles.footnote2,
                 color = colors.onSurfaceVariantSummary
             )
@@ -578,25 +626,31 @@ private fun LogRow(entry: AppLog.Entry) {
 }
 
 @Composable
-private fun SectionTitle(text: String) {
-    SmallTitle(text)
-}
-
-@Composable
 private fun SectionHeader(text: String, trailing: @Composable (() -> Unit)? = null) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 2.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp).padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text,
             style = MiuixTheme.textStyles.footnote1,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            fontWeight = FontWeight.Medium
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f)
         )
-        Spacer(Modifier.weight(1f))
-        if (trailing != null) trailing()
+        if (trailing != null) {
+            Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) { trailing() }
+        }
     }
+}
+
+@Composable
+private fun CardActions(content: @Composable RowScope.() -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        content = content
+    )
 }
 
 @Composable

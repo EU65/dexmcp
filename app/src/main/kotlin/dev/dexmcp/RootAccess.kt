@@ -6,16 +6,20 @@ import android.system.OsConstants
 import com.topjohnwu.superuser.Shell
 import java.io.File
 import java.io.RandomAccessFile
+import java.nio.file.AccessDeniedException
+import java.nio.file.NoSuchFileException
+import java.nio.file.NotDirectoryException
 import java.nio.file.Paths
 import java.util.Base64
 
 class RootAccess(private val context: Context) {
     private val allowedRoots = listOf(
-        "/system", "/system_ext", "/product", "/vendor", "/vendor_dlkm", "/odm", "/apex",
-        "/data/app", "/data/adb/ksu/log", "/data/adb/lspd/log",
-        "/proc/net", "/proc/charger", "/proc/charger_cp", "/proc/oplus_charge_pump",
-        "/proc/da9313", "/proc/devinfo/fastchg",
-        "/sys/class", "/sys/devices", "/sys/module", "/sys/kernel", "/sys/fs", "/sys/bus"
+        "/system", "/system_ext", "/system_dlkm", "/product", "/vendor", "/vendor_dlkm", "/odm", "/apex",
+        "/my_bigball", "/my_carrier", "/my_company", "/my_engineering",
+        "/my_heytap", "/my_manifest", "/my_preload", "/my_product",
+        "/my_region", "/my_reserve", "/my_stock",
+        "/data/app", "/data/dalvik-cache", "/data/misc/apexdata/com.android.art/dalvik-cache",
+        "/data/adb", "/mnt/opex", "/mnt/oplus", "/mnt/vendor", "/proc", "/sys"
     )
 
     fun allowList(): List<String> = allowedRoots
@@ -50,15 +54,35 @@ class RootAccess(private val context: Context) {
         require(path.startsWith('/')) { "Absolute path required" }
         val normalized = Paths.get(path).normalize().toFile().absoluteFile
         if (ServerConfig.allowAnyFile(context)) return normalized
-        if (allowedRoots.any { normalized.isUnder(it) }) return normalized
-        // A symlinked allowlisted directory (e.g. /vendor/lib/modules -> /vendor_dlkm/lib/modules)
-        // lists entries under its real path; accept those too when the target is allowlisted.
-        val real = runCatching { normalized.canonicalPath }.getOrNull()
-        if (real != null && allowedRoots.any { real == it || real.startsWith("$it/") }) return normalized
-        throw PathDeniedException(normalized.path)
+        if (!isAllowed(normalized.path)) throw PathDeniedException(normalized.path)
+        val real = try {
+            normalized.toPath().toRealPath().toString()
+        } catch (_: AccessDeniedException) {
+            if (!rootShellAvailable()) return normalized
+            Shell.cmd("toybox realpath " + quote(normalized.path)).exec()
+                .takeIf { it.isSuccess }?.out?.singleOrNull()
+                ?: throw java.io.IOException("Unable to resolve source path: ${normalized.path}")
+        } catch (_: NoSuchFileException) {
+            normalized.canonicalPath
+        } catch (_: NotDirectoryException) {
+            normalized.canonicalPath
+        }
+        // /proc/net is the system API for the caller's network namespace.
+        val procNetAlias = (normalized.path == "/proc/net" || normalized.path.startsWith("/proc/net/")) &&
+            procNetTarget.matches(real)
+        if (!isAllowed(real) && !procNetAlias) throw PathDeniedException(normalized.path)
+        return normalized
     }
 
-    private fun File.isUnder(root: String): Boolean = path == root || path.startsWith("$root/")
+    private fun isAllowed(path: String): Boolean {
+        if (allowedRoots.none { path == it || path.startsWith("$it/") }) return false
+        if (!path.startsWith("/proc/")) return true
+        val name = path.removePrefix("/proc/").substringBefore('/')
+        return name !in blockedProcNames && (name.isEmpty() || !name.all { it in '0'..'9' })
+    }
+
+    private val procNetTarget = Regex("/proc/[0-9]+/net(?:/.*)?")
+    private val blockedProcNames = setOf("self", "thread-self", "kcore", "vmcore", "kmsg")
 
     fun copyForAnalysis(path: String, destination: File) {
         val source = validateSource(path)
@@ -179,22 +203,19 @@ class RootAccess(private val context: Context) {
             .toList()
     }
 
-    // Searches do not follow symlinks or cross filesystem boundaries. Limit both
-    // traversal time and response size, independently of the caller's page size.
+    // Bound traversal time independently of pagination.
     fun discoverFiles(path: String, recursive: Boolean, maxDepth: Int): CommandOutput {
         val directory = validateSource(path)
         val depth = if (recursive) maxDepth.coerceIn(1, 8) else 1
-        // -L follows directory symlinks (/vendor/lib/modules -> /vendor_dlkm/...) and prints entries
-        // under the caller's path, so listed paths stay readable. No -xdev: the symlink target is
-        // usually a different mount, and skipping it is what made find_files miss existing modules.
-        val withLinks = execute("toybox timeout 20 sh -c " + quote(
-            "toybox find -L " + quote(directory.path) + " -mindepth 1 -maxdepth $depth"
-        ))
-        if (withLinks.exitCode == 0 || withLinks.stdout.isNotBlank()) return withLinks
-        // Older toybox builds may lack -L; fall back to a plain walk instead of returning nothing.
-        return execute("toybox timeout 20 sh -c " + quote(
-            "toybox find " + quote(directory.path) + " -mindepth 1 -maxdepth $depth"
-        ))
+        // Follow a symlink supplied as the start path, not symlinks found during traversal.
+        val start = quote(directory.path)
+        val base = "toybox find -H $start -mindepth 1 -maxdepth $depth"
+        val procFilter = if (directory.path == "/proc" && !ServerConfig.allowAnyFile(context)) {
+            val blocked = (blockedProcNames.map { "/proc/$it" } + "/proc/[0-9]*")
+                .joinToString(" -o ") { "-path " + quote(it) }
+            " \\( $blocked \\) -prune -o -print"
+        } else " -print"
+        return execute("toybox timeout 20 sh -c " + quote(base + procFilter))
     }
 
     fun captureLiveLog(source: String, lines: Int): CommandOutput {

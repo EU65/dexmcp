@@ -5,6 +5,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,8 +18,9 @@ import kotlinx.coroutines.flow.asStateFlow
 object AppLog {
     enum class Level { INFO, WARN, ERROR }
 
-    data class Entry(val time: Long, val level: Level, val message: String)
+    data class Entry(val time: Long, val level: Level, val message: String, val id: Long)
 
+    private val nextId = AtomicLong()
     private const val MAX_ENTRIES = 600
     private const val MAX_FILE_BYTES = 512L * 1024L
     private val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
@@ -50,8 +52,23 @@ object AppLog {
         file?.let { target -> runCatching { target.writeText("") } }
     }
 
+    @Synchronized
+    fun shareSnapshot(context: Context): File? {
+        val source = file?.takeIf { it.isFile && it.length() > 0 } ?: return null
+        val directory = File(context.cacheDir, "shared-logs").apply { mkdirs() }
+        val snapshot = File.createTempFile("dexmcp-", ".log", directory)
+        try {
+            source.copyTo(snapshot, overwrite = true)
+        } catch (e: Exception) {
+            snapshot.delete()
+            throw e
+        }
+        return snapshot
+    }
+
+    @Synchronized
     private fun append(level: Level, message: String) {
-        val entry = Entry(System.currentTimeMillis(), level, message.trim())
+        val entry = Entry(System.currentTimeMillis(), level, message.trim(), nextId.incrementAndGet())
         _entries.value = (_entries.value + entry).takeLast(MAX_ENTRIES)
         val target = file ?: return
         runCatching {
@@ -69,6 +86,6 @@ object AppLog {
         val level = runCatching { Level.valueOf(line.substring(20).substringBefore(' ')) }.getOrNull() ?: return null
         val message = line.substring(20 + level.name.length).trimStart()
         val time = runCatching { format.parse(stamp)?.time }.getOrNull() ?: return null
-        return Entry(time, level, message)
+        return Entry(time, level, message, nextId.incrementAndGet())
     }
 }
