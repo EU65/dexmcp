@@ -358,7 +358,8 @@ class ToolRouter(private val context: Context) {
         val bytes = root.read(path, offset, requestedMax)
         val requested = args.optString("format", "auto")
         val detected = if (offset == 0L) detectBinaryFormat(bytes) else null
-        val size = root.fileSize(path)
+        // sysfs procfs-style nodes report stat size 0 even though they have content.
+        val size = root.fileSize(path)?.takeIf { it > 0 }
 
         if (detected != null && (requested == "auto" || requested == "text")) {
             return jsonObject(

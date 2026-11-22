@@ -12,8 +12,8 @@ android {
         applicationId = "dev.dexmcp"
         minSdk = 28
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.4.9"
+        versionCode = 18
+        versionName = "0.4.10"
     }
 
     buildTypes {

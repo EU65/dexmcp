@@ -13,7 +13,8 @@ class RootAccess(private val context: Context) {
     private val allowedRoots = listOf(
         "/system", "/system_ext", "/product", "/vendor", "/odm", "/apex",
         "/data/app", "/data/adb/ksu/log", "/data/adb/lspd/log",
-        "/proc/net", "/sys/class/net", "/sys/fs/bpf"
+        "/proc/net", "/sys/class", "/sys/devices", "/sys/module", "/sys/kernel",
+        "/sys/fs", "/sys/bus", "/sys/fs/bpf"
     )
 
     private val accessProbePaths = listOf(

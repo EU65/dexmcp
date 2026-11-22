@@ -2,7 +2,9 @@
 
 一个在 Android 设备本机运行的 MCP 服务。面向同机运行的 Agent/LLM，提供系统信息、已安装包发现、受限 root 文件读取、APK/JAR/DEX 的 Smali 分析、内置 Frida 的动态分析，以及用 Miuix 重写的状态界面。
 
-当前版本是 `0.4.9`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+当前版本是 `0.4.10`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+
+0.4.10 默认放开 sysfs 读取：`/sys/class`、`/sys/devices`、`/sys/module`、`/sys/kernel`、`/sys/fs`、`/sys/bus` 都在只读白名单里，触摸/笔/电源/温控节点可以直接读；sysfs 节点 stat 大小为 0 时不再误判截断。
 
 0.4.9 修了 MCP 传输层：支持现代协议 2026-07-28（`server/discover`、`resultType`、`ttlMs`/`cacheScope`、无 `initialize` 握手），并按 `Transfer-Encoding: chunked` 读取请求体。之前 chunked 请求的 body 会被读不完整，残留内容拼到下一个请求行，客户端收到 `BAD REQUEST: Syntax error. HTTP verb ... POST unhandled.`
 
@@ -21,6 +23,8 @@
 0.4.2 把顶部状态区改成两块大的状态卡（MCP / Frida），版本、安装状态和会话数收进卡片；Root 单独一行只显示可用 / 不可用；监听端口可以在界面上改；常驻通知加了“停止”按钮；去掉了 SELinux 卡片和安装说明式的提示文字。
 
 主界面新增「允许读取任意路径」开关，默认关闭，切换立即生效。开启后文件读取、目录搜索和分析导入解除路径白名单限制；受保护文件仍需 root 权限。关闭后，白名单外的临时导出也无法继续下载。
+
+默认白名单里包含整个 `/sys/class`、`/sys/devices`、`/sys/module`、`/sys/kernel`、`/sys/fs`、`/sys/bus` 子树和 `/proc/net`，触摸、笔、屏幕、电源、温控这些 sysfs 节点可以直接用 `android_system_read_file` 读，不需要开「允许读取任意路径」。节点通常只有几行文本，`file_size` 是 0 表示 stat 不可靠（procfs/sysfs 的特性），内容本身照常返回。
 
 远程文件提取：`android_system_export_file` 先将文件复制到 App 缓存，返回 export_id、大小和 SHA-256；`android_system_read_export` 分块返回最多 64 KiB Base64 数据；完成后调用 `android_system_delete_export` 清理副本。电脑端决定目标路径，并校验大小和 SHA-256。
 
