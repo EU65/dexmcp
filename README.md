@@ -121,6 +121,21 @@ android.experimental.disableCompileSdkChecks=true
 
 代码只用到 API 36 及以下的符号，编译和运行都不依赖 SDK 37；以后升级到支持 37.0 的 AGP 后可以去掉这个开关并把 `compileSdk` 提到 37。
 
+### 签名与 CI
+
+release 构建默认用本机的 debug key 签名，方便直接 `assembleRelease`。要用正式 key 时，在仓库根目录放一个 `keystore.properties`（已 gitignore）：
+
+```properties
+storeFile=keystore/dexmcp-release.jks
+storePassword=...
+keyAlias=dexmcp
+keyPassword=...
+```
+
+CI（`.github/workflows/release.yml`）从 secrets 读同样的值：`DEXMCP_KEYSTORE_BASE64`（keystore 的 Base64）、`DEXMCP_KEYSTORE_PASSWORD`，`DEXMCP_KEY_ALIAS` 可选（默认 `dexmcp`）。push 到 `main`、打 `v*` tag 或手动触发都会构建 release APK；tag / 手动触发会创建 GitHub Release 并附上 APK。没有配 secrets 时构建走 debug 签名，只用于验证。
+
+换了签名之后第一次安装要和旧 debug 签名的包共存不了，需要先卸载旧版本（App 里的设置和工作区会一起清掉）。
+
 安装后打开 App。它会启动前台服务，并显示：
 
 ```text

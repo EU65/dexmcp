@@ -1,8 +1,27 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// Release signing: keystore.properties (local, gitignored) or DEXMCP_KEYSTORE_* env vars
+// (GitHub Actions). Without either, release builds fall back to the debug key so a plain
+// `assembleRelease` still works on a fresh checkout.
+val signingProperties = Properties().apply {
+    val file = rootProject.file("keystore.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
+}
+
+fun signingValue(property: String, env: String): String? =
+    signingProperties.getProperty(property) ?: System.getenv(env)
+
+val releaseStoreFile = signingValue("storeFile", "DEXMCP_KEYSTORE_FILE")
+val releaseStorePassword = signingValue("storePassword", "DEXMCP_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("keyAlias", "DEXMCP_KEY_ALIAS") ?: "dexmcp"
+val releaseKeyPassword = signingValue("keyPassword", "DEXMCP_KEY_PASSWORD") ?: releaseStorePassword
+val hasReleaseKey = !releaseStoreFile.isNullOrBlank() && !releaseStorePassword.isNullOrBlank()
 
 android {
     namespace = "dev.dexmcp"
@@ -16,12 +35,21 @@ android {
         versionName = "0.4.11"
     }
 
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Personal-use release APK remains installable and can replace an
-            // existing debug build signed with this machine's development key.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
