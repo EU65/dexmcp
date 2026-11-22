@@ -29,18 +29,24 @@ $temporary = $target + '.' + [guid]::NewGuid().ToString('N') + '.part'
 $export = $null
 try {
     $export = Invoke-PhoneTool android_system_export_file @{path=$RemotePath}
-    $output = [IO.File]::Create($temporary)
-    try {
-        [long]$offset = 0
-        do {
-            $chunk = Invoke-PhoneTool android_system_read_export @{export_id=$export.export_id;offset=$offset;max_bytes=65536}
-            $bytes = [Convert]::FromBase64String($chunk.content_base64)
-            if ($chunk.offset -ne $offset -or $bytes.Length -ne $chunk.bytes_read -or $chunk.next_offset -ne ($offset + $bytes.Length)) { throw 'Invalid download chunk' }
-            if (-not $chunk.eof -and $bytes.Length -eq 0) { throw 'Empty non-final download chunk' }
-            $output.Write($bytes, 0, $bytes.Length)
-            $offset += $bytes.Length
-        } while (-not $chunk.eof)
-    } finally { $output.Dispose() }
+    if ($export.download_path) {
+        $downloadUri = [Uri]::new([Uri]$McpUrl, [string]$export.download_path)
+        Invoke-WebRequest -Uri $downloadUri -Headers @{Authorization="Bearer $Token"} `
+            -UseBasicParsing -MaximumRedirection 0 -OutFile $temporary -TimeoutSec 1800
+    } else {
+        $output = [IO.File]::Create($temporary)
+        try {
+            [long]$offset = 0
+            do {
+                $chunk = Invoke-PhoneTool android_system_read_export @{export_id=$export.export_id;offset=$offset;max_bytes=65536}
+                $bytes = [Convert]::FromBase64String($chunk.content_base64)
+                if ($chunk.offset -ne $offset -or $bytes.Length -ne $chunk.bytes_read -or $chunk.next_offset -ne ($offset + $bytes.Length)) { throw 'Invalid download chunk' }
+                if (-not $chunk.eof -and $bytes.Length -eq 0) { throw 'Empty non-final download chunk' }
+                $output.Write($bytes, 0, $bytes.Length)
+                $offset += $bytes.Length
+            } while (-not $chunk.eof)
+        } finally { $output.Dispose() }
+    }
     if ((Get-Item -LiteralPath $temporary).Length -ne $export.size) { throw 'Downloaded size mismatch' }
     if ((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ne $export.sha256) { throw 'Downloaded SHA-256 mismatch' }
     Move-Item -LiteralPath $temporary -Destination $target -Force

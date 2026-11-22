@@ -242,15 +242,28 @@ class RootAccess(private val context: Context) {
      */
     private fun streamRootFile(source: File, destination: File) {
         destination.parentFile?.mkdirs()
-        destination.outputStream().buffered(128 * 1024).use { output ->
-            var offset = 0L
-            while (true) {
-                val bytes = read(source.path, offset, 65536)
-                output.write(bytes)
-                offset += bytes.size
-                require(offset <= 2_147_483_648L) { "Source exceeds 2 GiB" }
-                if (bytes.size < 65536) break
+        val child = ProcessBuilder("su", "-c", "toybox timeout 120 toybox cat " + quote(source.path))
+            .redirectError(File("/dev/null")).start()
+        try {
+            child.outputStream.close()
+            destination.outputStream().use { output ->
+                child.inputStream.use { input ->
+                    val buffer = ByteArray(128 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        require(total <= 2_147_483_648L) { "Source exceeds 2 GiB" }
+                        output.write(buffer, 0, count)
+                    }
+                }
             }
+            check(child.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) && child.exitValue() == 0) {
+                "Root file copy failed or timed out"
+            }
+        } finally {
+            child.destroyForcibly()
         }
     }
     private fun quote(value: String): String = "'" + value.replace("'", "'\\''") + "'"

@@ -4,6 +4,8 @@ import android.content.Context
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.FileNotFoundException
+import java.net.InetAddress
 
 /**
  * MCP endpoint. Speaks both protocol eras:
@@ -39,6 +41,7 @@ class McpHttpServer(
             drain(session)
             return jsonResponse(JSONObject().put("ok", true).put("service", "dex-mcp"))
         }
+        if (session.uri.startsWith("/exports/")) return serveExport(session)
         if (session.uri != "/mcp") {
             drain(session)
             return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found")
@@ -95,6 +98,58 @@ class McpHttpServer(
         } catch (t: Throwable) {
             jsonRpcError(null, -32603, t.message ?: t.javaClass.simpleName)
         }
+    }
+
+    private fun serveExport(session: IHTTPSession): Response {
+        // Downloads have no request body and never need to buffer one.
+        if (session.method != Method.GET || session.headers.containsKey("transfer-encoding") ||
+            session.headers["content-length"]?.let { it != "0" } == true) {
+            return newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, MIME_PLAINTEXT, "GET required")
+                .apply { closeConnection(true) }
+        }
+        val auth = session.headers["authorization"]
+        if (auth == null || !auth.startsWith("Bearer ")) {
+            return newFixedLengthResponse(Response.Status.UNAUTHORIZED, MIME_PLAINTEXT, "Unauthorized")
+        }
+        val loopback = runCatching { InetAddress.getByName(session.remoteIpAddress).isLoopbackAddress }.getOrDefault(false)
+        val missing = { newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Export not found") }
+        return try {
+            val export = router.openDownload(session.uri.removePrefix("/exports/"), auth, loopback, auth == "Bearer $token")
+                ?: return missing()
+            val etag = "\"${export.sha256}\""
+            val range = session.headers["range"]?.takeIf { session.headers["if-range"]?.let { it == etag } ?: true }
+            val bounds = range?.let { parseDownloadRange(it, export.size) }
+            if (range != null && bounds == null) {
+                return newFixedLengthResponse(Response.Status.RANGE_NOT_SATISFIABLE, MIME_PLAINTEXT, "Invalid Range")
+                    .apply { addHeader("Content-Range", "bytes */${export.size}") }
+            }
+            val start = bounds?.first ?: 0L
+            val length = bounds?.let { it.last - it.first + 1 } ?: export.size
+            val status = if (bounds == null) Response.Status.OK else Response.Status.PARTIAL_CONTENT
+            newFixedLengthResponse(status, "application/octet-stream", export.open(start), length).apply {
+                addHeader("Accept-Ranges", "bytes")
+                addHeader("ETag", etag)
+                addHeader("Cache-Control", "no-store")
+                if (bounds != null) addHeader("Content-Range", "bytes ${bounds.first}-${bounds.last}/${export.size}")
+            }
+        } catch (_: PathDeniedException) {
+            missing()
+        } catch (_: FileNotFoundException) {
+            missing()
+        }
+    }
+
+    private fun parseDownloadRange(value: String, size: Long): LongRange? {
+        if (size <= 0) return null
+        val match = Regex("bytes=([0-9]*)-([0-9]*)").matchEntire(value.trim()) ?: return null
+        val (left, right) = match.destructured
+        if (left.isEmpty()) {
+            val suffix = right.toLongOrNull()?.takeIf { it > 0 } ?: return null
+            return maxOf(0, size - suffix)..(size - 1)
+        }
+        val start = left.toLongOrNull()?.takeIf { it < size } ?: return null
+        val end = if (right.isEmpty()) size - 1 else minOf(right.toLongOrNull() ?: return null, size - 1)
+        return if (end >= start) start..end else null
     }
 
     private fun discover(): JSONObject = JSONObject()

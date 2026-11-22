@@ -19,9 +19,12 @@ class ToolRouter(private val context: Context) {
     private val exports = FileExports(context, root)
     private val frida = FridaManager.get(context)
 
+    fun openDownload(id: String, authorization: String?, sameDevice: Boolean, serverAuthorized: Boolean) =
+        exports.download(id, authorization, sameDevice, serverAuthorized)
+
     fun toolDefinitions(): JSONArray = jsonArray(
         listOf(
-            tool("android_system_export_file", "Prepare a stable copy of a phone file for downloading to the agent workspace. Returns export_id, size and SHA-256; path access follows the App switch.", mapOf("path" to stringSchema("Absolute source file path")), listOf("path")),
+            tool("android_system_export_file", "Prepare a stable copy of a phone file for downloading to the agent workspace. Returns download_path, a local download_token, size and SHA-256. Stream the binary via HTTP or use the legacy chunk tool.", mapOf("path" to stringSchema("Absolute source file path")), listOf("path")),
             tool("android_system_read_export", "Download one Base64 chunk of a prepared export; decode and write bytes in the agent workspace, repeat until eof.", mapOf("export_id" to stringSchema("Export ID"), "offset" to integerSchema("Byte offset"), "max_bytes" to integerSchema("Chunk bytes, capped at 65536")), listOf("export_id")),
             tool("android_system_delete_export", "Remove a temporary downloaded file copy from App cache.", mapOf("export_id" to stringSchema("Export ID")), listOf("export_id")),
             tool("android_system_get_summary", "Get Android build, ABI and root availability.", emptyMap()),
@@ -130,6 +133,11 @@ class ToolRouter(private val context: Context) {
                 "cursor" to stringSchema("Cursor"),
                 "limit" to integerSchema("Page size, 1-200")
             ), listOf("workspace_id", "query")),
+            tool("android_analysis_export_entry", "Prepare one APK/ZIP entry for binary HTTP download without launching the app. Returns download_path, local download_token, size and SHA-256.", mapOf(
+                "workspace_id" to stringSchema("Open analysis workspace ID"),
+                "artifact_id" to stringSchema("Source artifact ID; defaults to the first artifact"),
+                "path" to stringSchema("Exact ZIP entry path")
+            ), listOf("workspace_id", "path")),
             tool("android_analysis_read", "Read decoded manifest, ZIP text, class Smali, or method Smali with character pagination. Use ids for batch method/class reads.", mapOf(
                 "workspace_id" to stringSchema("Workspace ID"),
                 "type" to enumSchema("manifest", "zip_entry", "class", "method"),
@@ -239,6 +247,13 @@ class ToolRouter(private val context: Context) {
                     workspaces.get(args.getString("workspace_id")), args.getString("class")
                 )
                 "android_analysis_search" -> analyzer.search(workspaces.get(args.getString("workspace_id")), args)
+                "android_analysis_export_entry" -> {
+                    val workspace = workspaces.get(args.getString("workspace_id"))
+                    val id = args.optString("artifact_id")
+                    val artifact = if (id.isBlank()) workspace.artifacts.first() else
+                        workspace.artifacts.firstOrNull { it.id == id } ?: error("Artifact not found: $id")
+                    exports.prepareEntry(artifact, args.getString("path"))
+                }
                 "android_analysis_read" -> analyzer.read(workspaces.get(args.getString("workspace_id")), args)
                 "android_analysis_xref_dex" -> analyzer.xref(workspaces.get(args.getString("workspace_id")), args)
                 "android_frida_status" -> frida.status()

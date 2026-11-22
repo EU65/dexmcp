@@ -16,7 +16,8 @@ data class Artifact(
     val sourcePath: String,
     val localFile: File,
     val size: Long,
-    val sha256: String
+    val sha256: String,
+    val imported: Boolean = false
 )
 
 data class DexUnit(
@@ -71,13 +72,14 @@ class WorkspaceManager(private val context: Context, private val root: RootAcces
             paths.distinct().mapIndexed { index, source ->
                 val safeName = File(source).name.replace(Regex("[^A-Za-z0-9._-]"), "_")
                 val local = File(dir, "$index-$safeName")
-                if (imported != null && imported.file.canonicalPath == File(source).canonicalPath) {
-                    imported.file.inputStream().use { input -> local.outputStream().use(input::copyTo) }
+                val fromPicker = imported != null && imported.file.canonicalPath == File(source).canonicalPath
+                if (fromPicker) {
+                    checkNotNull(imported).file.inputStream().use { input -> local.outputStream().use(input::copyTo) }
                 } else {
                     root.copyForAnalysis(source, local)
                 }
                 val digest = sha256(local)
-                Artifact("sha256:$digest", source, local, local.length(), digest)
+                Artifact("sha256:$digest", source, local, local.length(), digest, fromPicker)
             }
         } catch (t: Throwable) {
             dir.deleteRecursively()

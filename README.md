@@ -41,7 +41,22 @@
 
 返回 `strings` 数组、`count` 和 `truncated`；`grep` 是设备侧 `grep -aE` 的扩展正则，`max_strings` 默认 2000。普通读取失败时返回 `error`、`reason`、`errno`、`type`，其中 `policy_denied` 表示路径被 App 白名单拦下（没有发生系统调用），`eacces` / `eacces_selinux` 是内核或 SELinux 拒绝。
 
-远程文件提取：`android_system_export_file` 先将文件复制到 App 缓存，返回 export_id、大小和 SHA-256；`android_system_read_export` 分块返回最多 64 KiB Base64 数据；完成后调用 `android_system_delete_export` 清理副本。电脑端决定目标路径，并校验大小和 SHA-256。
+### 大文件导出
+
+1. 设备文件调用 `android_system_export_file`。APK 内文件先调用 `android_analysis_open`，再调用 `android_analysis_export_entry`，传入 `workspace_id`、条目的 `path` 和可选的 `artifact_id`。它只解压指定条目，不启动目标 App。
+2. 工具返回 `download_path`、`size`、`sha256` 和 `download_token`。从同一台手机的 RikkaHub Ubuntu 工作区下载时，用这个仅对当前导出有效的 30 分钟令牌。远程客户端通过原来的 MCP Bearer Token 认证。
+3. HTTP 接口直接传二进制，支持单段 Range。下载完成校验大小和 SHA-256，再调用 `android_system_delete_export` 清理手机缓存。
+
+```bash
+# 变量取自工具返回值，8765 改成实际 MCP 端口。
+curl --fail --continue-at - --output global-metadata.dat.part \
+  -H "Authorization: Bearer $DOWNLOAD_TOKEN" \
+  "http://127.0.0.1:8765$DOWNLOAD_PATH"
+printf '%s  %s\n' "$SHA256" global-metadata.dat.part | sha256sum -c - && \
+  mv global-metadata.dat.part global-metadata.dat
+```
+
+`android_system_read_export` 的 64 KiB Base64 接口保留给旧客户端。新接口不会把文件内容塞进工具响应。
 
 PowerShell 脚本默认读取 Codex 的 dexmcp 连接配置，不打印 Token；也支持 `-McpUrl` 和 `DEXMCP_TOKEN` 环境变量：
 
