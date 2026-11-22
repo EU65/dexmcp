@@ -11,11 +11,14 @@ import java.util.Base64
 
 class RootAccess(private val context: Context) {
     private val allowedRoots = listOf(
-        "/system", "/system_ext", "/product", "/vendor", "/odm", "/apex",
+        "/system", "/system_ext", "/product", "/vendor", "/vendor_dlkm", "/odm", "/apex",
         "/data/app", "/data/adb/ksu/log", "/data/adb/lspd/log",
-        "/proc/net", "/sys/class", "/sys/devices", "/sys/module", "/sys/kernel",
-        "/sys/fs", "/sys/bus", "/sys/fs/bpf"
+        "/proc/net", "/proc/charger", "/proc/charger_cp", "/proc/oplus_charge_pump",
+        "/proc/da9313", "/proc/devinfo/fastchg",
+        "/sys/class", "/sys/devices", "/sys/module", "/sys/kernel", "/sys/fs", "/sys/bus"
     )
+
+    fun allowList(): List<String> = allowedRoots
 
     private val accessProbePaths = listOf(
         "/data/system/packages.xml",
@@ -46,12 +49,16 @@ class RootAccess(private val context: Context) {
     fun validateSource(path: String): File {
         require(path.startsWith('/')) { "Absolute path required" }
         val normalized = Paths.get(path).normalize().toFile().absoluteFile
-        val value = normalized.path
-        require(ServerConfig.allowAnyFile(context) || allowedRoots.any { value == it || value.startsWith("$it/") }) {
-            "Path is outside the read-only allowlist: $value"
-        }
-        return normalized
+        if (ServerConfig.allowAnyFile(context)) return normalized
+        if (allowedRoots.any { normalized.isUnder(it) }) return normalized
+        // A symlinked allowlisted directory (e.g. /vendor/lib/modules -> /vendor_dlkm/lib/modules)
+        // lists entries under its real path; accept those too when the target is allowlisted.
+        val real = runCatching { normalized.canonicalPath }.getOrNull()
+        if (real != null && allowedRoots.any { real == it || real.startsWith("$it/") }) return normalized
+        throw PathDeniedException(normalized.path)
     }
+
+    private fun File.isUnder(root: String): Boolean = path == root || path.startsWith("$root/")
 
     fun copyForAnalysis(path: String, destination: File) {
         val source = validateSource(path)
@@ -85,9 +92,25 @@ class RootAccess(private val context: Context) {
         val range = if (position % 65536 == 0L) "bs=65536 skip=${position / 65536} count=1" else "bs=1 skip=$position count=$count"
         val command = "set -o pipefail; toybox timeout 15 toybox dd if=${quote(source.path)} $range | toybox base64"
         val result = Shell.cmd(command).exec()
-        check(result.isSuccess) { "Root read failed: ${result.err.joinToString("\n")}" }
+        if (!result.isSuccess) {
+            throw java.io.IOException(result.err.joinToString("\n").ifBlank { "Root read failed (exit ${result.code})" })
+        }
         val bytes = Base64.getMimeDecoder().decode(result.out.joinToString("\n"))
         return bytes.copyOf(minOf(bytes.size, count))
+    }
+
+    /**
+     * Extract printable strings on the device instead of shipping the whole file: a 10 MB module
+     * becomes a few KB of strings. Falls back to `grep -o` when toybox lacks `strings`.
+     */
+    fun strings(path: String, minLen: Int, pattern: String?, maxBytes: Int): CommandOutput {
+        val source = validateSource(path)
+        val min = minLen.coerceIn(1, 128)
+        val limit = maxBytes.coerceIn(1024, 262_144)
+        val extract = "toybox strings -n $min " + quote(source.path) +
+            " 2>/dev/null || toybox grep -aoE " + quote("[ -~]{$min,}") + " " + quote(source.path)
+        val filter = pattern?.takeIf { it.isNotBlank() }?.let { " | toybox grep -aE " + quote(it) }.orEmpty()
+        return execute("toybox timeout 20 sh -c " + quote(extract + filter + " | toybox head -c $limit"))
     }
 
     fun fileSize(path: String): Long? {
@@ -161,9 +184,17 @@ class RootAccess(private val context: Context) {
     fun discoverFiles(path: String, recursive: Boolean, maxDepth: Int): CommandOutput {
         val directory = validateSource(path)
         val depth = if (recursive) maxDepth.coerceIn(1, 8) else 1
-        val command = "resolved=\$(toybox readlink -f " + quote(directory.path) +
-            ") && toybox find \"\$resolved\" -xdev -mindepth 1 -maxdepth $depth"
-        return execute("toybox timeout 20 sh -c " + quote(command))
+        // -L follows directory symlinks (/vendor/lib/modules -> /vendor_dlkm/...) and prints entries
+        // under the caller's path, so listed paths stay readable. No -xdev: the symlink target is
+        // usually a different mount, and skipping it is what made find_files miss existing modules.
+        val withLinks = execute("toybox timeout 20 sh -c " + quote(
+            "toybox find -L " + quote(directory.path) + " -mindepth 1 -maxdepth $depth"
+        ))
+        if (withLinks.exitCode == 0 || withLinks.stdout.isNotBlank()) return withLinks
+        // Older toybox builds may lack -L; fall back to a plain walk instead of returning nothing.
+        return execute("toybox timeout 20 sh -c " + quote(
+            "toybox find " + quote(directory.path) + " -mindepth 1 -maxdepth $depth"
+        ))
     }
 
     fun captureLiveLog(source: String, lines: Int): CommandOutput {
@@ -233,5 +264,9 @@ data class PrivilegedReadStatus(
     val probePath: String,
     val error: String?
 )
+
+/** Raised before any syscall when the path is outside the App's read-only allowlist. */
+class PathDeniedException(val path: String) :
+    IllegalArgumentException("Path is outside the read-only allowlist: $path")
 
 

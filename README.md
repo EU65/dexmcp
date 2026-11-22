@@ -2,7 +2,9 @@
 
 一个在 Android 设备本机运行的 MCP 服务。面向同机运行的 Agent/LLM，提供系统信息、已安装包发现、受限 root 文件读取、APK/JAR/DEX 的 Smali 分析、内置 Frida 的动态分析，以及用 Miuix 重写的状态界面。
 
-当前版本是 `0.4.10`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+当前版本是 `0.4.11`，包含静态分析、系统诊断、内置 Frida 动态分析和 Miuix 界面（无需 adb / frida-server）：
+
+0.4.11 补了充电相关的只读路径（`/vendor_dlkm`、`/proc/charger`、`/proc/charger_cp`、`/proc/oplus_charge_pump`、`/proc/da9313`、`/proc/devinfo/fastchg`）；`list_directory` / `find_files` 改为跟随目录符号链接并按入参路径回显，列出来的路径一定能读；错误返回带 `reason`（`policy_denied` / `eacces` / `eacces_selinux` / `enoent` / `eisdir` / `espipe`）和 `errno`；`android_system_read_file` 新增 `format=strings`，在设备侧抽可打印字符串，大文件不用整份 base64 回传。
 
 0.4.10 默认放开 sysfs 读取：`/sys/class`、`/sys/devices`、`/sys/module`、`/sys/kernel`、`/sys/fs`、`/sys/bus` 都在只读白名单里，触摸/笔/电源/温控节点可以直接读；sysfs 节点 stat 大小为 0 时不再误判截断。
 
@@ -24,7 +26,20 @@
 
 主界面新增「允许读取任意路径」开关，默认关闭，切换立即生效。开启后文件读取、目录搜索和分析导入解除路径白名单限制；受保护文件仍需 root 权限。关闭后，白名单外的临时导出也无法继续下载。
 
-默认白名单里包含整个 `/sys/class`、`/sys/devices`、`/sys/module`、`/sys/kernel`、`/sys/fs`、`/sys/bus` 子树和 `/proc/net`，触摸、笔、屏幕、电源、温控这些 sysfs 节点可以直接用 `android_system_read_file` 读，不需要开「允许读取任意路径」。节点通常只有几行文本，`file_size` 是 0 表示 stat 不可靠（procfs/sysfs 的特性），内容本身照常返回。
+默认白名单里包含整个 `/sys/class`、`/sys/devices`、`/sys/module`、`/sys/kernel`、`/sys/fs`、`/sys/bus` 子树、`/proc/net`、`/vendor_dlkm` 和几个充电 proc 节点（`/proc/charger`、`/proc/charger_cp`、`/proc/oplus_charge_pump`、`/proc/da9313`、`/proc/devinfo/fastchg`），触摸、笔、屏幕、电源、温控、充电这些节点可以直接用 `android_system_read_file` 读，不需要开「允许读取任意路径」。节点通常只有几行文本，`file_size` 是 `null` 表示 stat 不可靠（procfs/sysfs 的特性），内容本身照常返回。
+
+`list_directory` / `find_files` 会跟随目录符号链接（比如 `/vendor/lib/modules -> /vendor_dlkm/lib/modules`），并且按入参路径回显，所以列表里的路径可以直接交给 `read_file`；`find_files` 不再用 `-xdev`，跨挂载点（`/vendor_dlkm`）也能搜到。
+
+`read_file` 支持 `format=strings`，在设备上用 `strings`/`grep` 抽完再回传：
+
+```json
+{"name":"android_system_read_file","arguments":{
+  "path":"/vendor/lib/modules/oplus_chg_v2.ko",
+  "format":"strings","min_len":6,"grep":"flag|token|seal","max_bytes":65536
+}}
+```
+
+返回 `strings` 数组、`count` 和 `truncated`；`grep` 是设备侧 `grep -aE` 的扩展正则，`max_strings` 默认 2000。普通读取失败时返回 `error`、`reason`、`errno`、`type`，其中 `policy_denied` 表示路径被 App 白名单拦下（没有发生系统调用），`eacces` / `eacces_selinux` 是内核或 SELinux 拒绝。
 
 远程文件提取：`android_system_export_file` 先将文件复制到 App 缓存，返回 export_id、大小和 SHA-256；`android_system_read_export` 分块返回最多 64 KiB Base64 数据；完成后调用 `android_system_delete_export` 清理副本。电脑端决定目标路径，并校验大小和 SHA-256。
 

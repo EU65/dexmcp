@@ -31,19 +31,22 @@ class ToolRouter(private val context: Context) {
                 "cursor" to stringSchema("Cursor returned by the previous call"),
                 "limit" to integerSchema("Maximum results, 1-200")
             )),
-            tool("android_system_read_file", "Read a bounded byte range; allowed paths follow the App allow-any-file switch. Uses root when needed. ZIP/ELF/PNG/DEX content is reported as is_binary instead of being decoded as text.", mapOf(
+            tool("android_system_read_file", "Read a bounded byte range; allowed paths follow the App allow-any-file switch. Uses root when needed. ZIP/ELF/PNG/DEX content is reported as is_binary instead of being decoded as text. format=strings extracts printable runs on the device, so a large .so/.ko only returns the matching strings.", mapOf(
                 "path" to stringSchema("Absolute path (App path-access policy applies)"),
-                "offset" to integerSchema("Byte offset"),
-                "max_bytes" to integerSchema("Maximum bytes, capped at 65536"),
-                "format" to enumSchema("text", "hex", "base64", "auto")
+                "offset" to integerSchema("Byte offset (ignored by format=strings)"),
+                "max_bytes" to integerSchema("Maximum bytes, capped at 65536; for format=strings it caps the extracted text"),
+                "format" to enumSchema("text", "hex", "base64", "strings", "auto"),
+                "min_len" to integerSchema("format=strings: minimum printable run length, default 6"),
+                "max_strings" to integerSchema("format=strings: maximum returned strings, default 2000"),
+                "grep" to stringSchema("format=strings: extended regex filter applied on the device, e.g. 'flag|token'")
             ), listOf("path")),
-            tool("android_system_list_directory", "List directory entries under the App path-access policy without following symlinks. Entries include files and directories.", mapOf(
+            tool("android_system_list_directory", "List directory entries under the App path-access policy. Directory symlinks are followed and entries are reported under the requested path, so every returned path can be read back directly.", mapOf(
                 "path" to stringSchema("Absolute directory (App path-access policy applies)"),
                 "query" to stringSchema("Case-insensitive filename substring"),
                 "cursor" to stringSchema("Cursor from previous call; keep other arguments identical"),
                 "limit" to integerSchema("Page size, 1-200")
             ), listOf("path")),
-            tool("android_system_find_files", "Discover system files and directories by filename; bounded depth/time, no symlink traversal.", mapOf(
+            tool("android_system_find_files", "Discover system files and directories by filename; bounded depth/time. Directory symlinks are followed and matches are reported under the requested path, so a listed file can always be read back.", mapOf(
                 "path" to stringSchema("Absolute starting directory (App path-access policy applies)"),
                 "query" to stringSchema("Case-insensitive filename substring"),
                 "max_depth" to integerSchema("Traversal depth, 1-8; default 4"),
@@ -270,8 +273,40 @@ class ToolRouter(private val context: Context) {
             }
             toolResult(data, false)
         } catch (t: Throwable) {
-            toolResult(jsonObject("error" to (t.message ?: t.javaClass.simpleName), "type" to t.javaClass.name), true)
+            toolResult(errorObject(t), true)
         }
+    }
+
+    /**
+     * Classify failures so the agent can tell an App-side allowlist denial (no syscall was made)
+     * from a kernel/SELinux denial or a missing file.
+     */
+    private fun errorObject(t: Throwable): JSONObject {
+        val message = t.message ?: t.javaClass.simpleName
+        val reason = when {
+            t is PathDeniedException -> "policy_denied"
+            message.contains("Is a directory", ignoreCase = true) -> "eisdir"
+            message.contains("Permission denied", ignoreCase = true) -> "eacces"
+            message.contains("avc:", ignoreCase = true) || message.contains("SELinux", ignoreCase = true) -> "eacces_selinux"
+            message.contains("No such file", ignoreCase = true) || message.contains("ENOENT", ignoreCase = true) -> "enoent"
+            message.contains("Illegal seek", ignoreCase = true) || message.contains("Invalid argument", ignoreCase = true) -> "espipe"
+            message.contains("root shell access", ignoreCase = true) || message.contains("privileged read", ignoreCase = true) -> "eperm"
+            else -> "internal"
+        }
+        val errno = when (reason) {
+            "eperm" -> 1
+            "enoent" -> 2
+            "eacces", "eacces_selinux" -> 13
+            "eisdir" -> 21
+            "espipe" -> 29
+            else -> null
+        }
+        return jsonObject(
+            "error" to message,
+            "reason" to reason,
+            "errno" to errno,
+            "type" to t.javaClass.name
+        )
     }
 
     private fun systemSummary(): JSONObject {
@@ -295,11 +330,7 @@ class ToolRouter(private val context: Context) {
             "allow_any_file" to ServerConfig.allowAnyFile(context),
             "frida_enabled" to ServerConfig.fridaEnabled(context),
             "frida_autostart" to ServerConfig.autostartEnabled(context),
-            "read_allowlist" to jsonArray(if (ServerConfig.allowAnyFile(context)) listOf("/") else listOf(
-                "/system", "/system_ext", "/product", "/vendor", "/odm", "/apex", "/data/app",
-                "/data/adb/ksu/log", "/data/adb/lspd/log",
-                "/proc/net", "/sys/class/net", "/sys/fs/bpf"
-            ))
+            "read_allowlist" to jsonArray(if (ServerConfig.allowAnyFile(context)) listOf("/") else root.allowList())
         )
     }
 
@@ -353,10 +384,31 @@ class ToolRouter(private val context: Context) {
 
     private fun readSystemFile(args: JSONObject): JSONObject {
         val path = args.getString("path")
+        val requested = args.optString("format", "auto")
+        if (requested == "strings") {
+            val minLen = args.optInt("min_len", 6)
+            val pattern = args.optString("grep").takeIf { it.isNotBlank() }
+            val limit = args.optInt("max_bytes", 65_536)
+            val maxStrings = args.optInt("max_strings", 2_000).coerceIn(1, 20_000)
+            val result = root.strings(path, minLen, pattern, limit)
+            val lines = result.stdout.lineSequence().filter { it.isNotEmpty() }.toList()
+            val page = lines.take(maxStrings)
+            return jsonObject(
+                "path" to path,
+                "format" to "strings",
+                "min_len" to minLen.coerceIn(1, 128),
+                "grep" to pattern,
+                "count" to page.size,
+                "strings" to jsonArray(page),
+                "truncated" to (page.size < lines.size || result.stdout.length >= limit.coerceIn(1024, 262_144)),
+                "exit_code" to result.exitCode,
+                "stderr" to result.stderr
+            )
+        }
+
         val offset = args.optLong("offset", 0).coerceAtLeast(0)
         val requestedMax = args.optInt("max_bytes", 32_768)
         val bytes = root.read(path, offset, requestedMax)
-        val requested = args.optString("format", "auto")
         val detected = if (offset == 0L) detectBinaryFormat(bytes) else null
         // sysfs procfs-style nodes report stat size 0 even though they have content.
         val size = root.fileSize(path)?.takeIf { it > 0 }
