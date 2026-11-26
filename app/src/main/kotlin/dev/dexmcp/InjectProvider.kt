@@ -4,6 +4,7 @@ import android.content.ContentProvider
 import android.content.ContentValues
 import android.database.Cursor
 import android.net.Uri
+import android.os.Binder
 import android.os.Bundle
 import java.util.concurrent.ConcurrentHashMap
 
@@ -18,8 +19,8 @@ import java.util.concurrent.ConcurrentHashMap
  * normally.
  *
  * No permission protects the provider: the caller is the target app itself, so it
- * cannot hold a signature permission. The pid/package check and the fact that scripts
- * are chosen by Dex MCP limit abuse to "instrument a package that already has a script".
+ * cannot hold a signature permission. The provider checks the Binder caller's PID
+ * and UID before looking up the enabled startup script.
  */
 class InjectProvider : ContentProvider() {
 
@@ -47,6 +48,12 @@ class InjectProvider : ContentProvider() {
         }
         if (pkg == context.packageName) return fail("denied", "Dex MCP itself is never instrumented")
 
+        if (Binder.getCallingPid() != pid ||
+            context.packageManager.getPackagesForUid(Binder.getCallingUid())?.contains(pkg) != true
+        ) {
+            return fail("caller_mismatch", "Startup requests must come from the target process")
+        }
+
         val now = System.currentTimeMillis()
         val previous = lastRequest[pid]
         if (previous != null && now - previous < 3_000) return fail("busy", "Request already handled")
@@ -56,7 +63,12 @@ class InjectProvider : ContentProvider() {
             "toybox cat /proc/$pid/cmdline 2>/dev/null | toybox tr '\\0' '\\n' | toybox head -n 1",
             10_000
         ).text.trim()
-        if (cmdline != pkg) return fail("pid_mismatch", "pid $pid is '$cmdline', not '$pkg'")
+        if (cmdline != pkg && !cmdline.startsWith("$pkg:")) {
+            return fail("pid_mismatch", "pid $pid is '$cmdline', not '$pkg' or a subprocess")
+        }
+        if (cmdline != pkg && AgentStore.scope(context, pkg) != AgentStore.SCOPE_ALL) {
+            return fail("main_process_only", "$pkg is configured for main-process injection only")
+        }
 
         val frida = FridaManager.get(context)
         if (frida.isRecentlyStartedManually(pkg)) {
@@ -74,9 +86,10 @@ class InjectProvider : ContentProvider() {
         if (!frida.hasAgentScript(pkg)) return fail("no_script", "No startup script for $pkg")
 
         val result = frida.injectStartup(pkg, pid)
+        val runtimeReady = result.optBoolean("ready")
         return jsonObject(
-            "ok" to true,
-            "reason" to if (result.optBoolean("ready")) "ready" else "attached",
+            "ok" to runtimeReady,
+            "reason" to if (runtimeReady) "runtime_ready" else "runtime_not_confirmed",
             "package" to pkg,
             "pid" to pid,
             "session_id" to result.optString("session_id"),

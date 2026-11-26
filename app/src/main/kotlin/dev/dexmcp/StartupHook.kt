@@ -9,11 +9,12 @@ import io.github.libxposed.api.XposedModuleInterface
 /**
  * LSPosed entry point for the modern Xposed API 102 (see META-INF/xposed/java_init.list).
  *
- * LSPosed only loads this class into apps selected in its scope. For the main process of
- * each such app we hook `Instrumentation.callApplicationOnCreate`, i.e. right before
+ * LSPosed only loads this class into apps selected in its scope. In every process of such
+ * an app we hook `Instrumentation.callApplicationOnCreate`, i.e. right before
  * `Application.onCreate()`, ask the Dex MCP process to attach Frida with the configured
- * startup script, and only then let the app continue. If Dex MCP has no script for the
- * package, startup injection is disabled, or the runtime is missing, the app starts
+ * startup script, and only then let the app continue. The provider decides whether the
+ * calling process may be injected based on the package's scope; if Dex MCP has no script
+ * for the package, startup injection is disabled, or the runtime is missing, the app starts
  * normally.
  *
  * Keep this class self-contained: it is loaded inside third-party apps and must not pull
@@ -43,12 +44,8 @@ class StartupHook : XposedModule() {
 
     private fun inject(app: android.app.Application) {
         val pkg = app.packageName ?: return
-        // Only the main process of the package; subprocesses (:remote) are skipped here
-        // instead of paying for a provider call that would reject them anyway.
-        val process = runCatching {
-            java.io.File("/proc/self/cmdline").readText().substringBefore('\u0000')
-        }.getOrDefault(pkg)
-        if (process != pkg) return
+        // Every process of the package calls here. The provider rejects subprocesses
+        // unless the package scope is "all", so no check is needed in the target app.
         try {
             val extras = android.os.Bundle().apply {
                 putString("package", pkg)

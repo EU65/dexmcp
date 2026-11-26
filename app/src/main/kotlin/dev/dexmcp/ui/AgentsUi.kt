@@ -161,6 +161,7 @@ private fun AgentRow(
         append(app.packageName)
         append(" · ")
         append(if (app.scriptBytes > 0) "脚本 ${MainState.formatBytes(app.scriptBytes)}" else "没有脚本")
+        if (app.allProcesses) append(" · 全部进程")
         if (app.enabled && !inScope) append(" · 未授权作用域")
     }
     Card {
@@ -216,6 +217,24 @@ fun ScriptScreen(state: MainState, onBack: () -> Unit) {
                 style = MiuixTheme.textStyles.footnote2,
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary
             )
+            Spacer(Modifier.height(10.dp))
+            val app = state.agents.firstOrNull { it.packageName == pkg }
+            Card {
+                BasicComponent(
+                    title = "注入所有进程",
+                    summary = if (app?.allProcesses == true) {
+                        "主进程和子进程，例如 :unstable，都会加载这个脚本"
+                    } else {
+                        "只注入主进程"
+                    },
+                    endActions = {
+                        Switch(
+                            checked = app?.allProcesses == true,
+                            onCheckedChange = { scope.launch { state.setAgentScope(pkg, it) } }
+                        )
+                    }
+                )
+            }
             Spacer(Modifier.height(10.dp))
             if (state.scriptLoading) {
                 Text(

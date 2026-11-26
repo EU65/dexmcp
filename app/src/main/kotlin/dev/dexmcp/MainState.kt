@@ -23,8 +23,11 @@ data class AgentApp(
     val packageName: String,
     val label: String,
     val enabled: Boolean,
-    val scriptBytes: Long
-)
+    val scriptBytes: Long,
+    val scope: String = AgentStore.SCOPE_MAIN
+) {
+    val allProcesses: Boolean get() = scope == AgentStore.SCOPE_ALL
+}
 
 /** UI state and actions for the Miuix screen; all actions that touch root run on IO. */
 class MainState(private val context: Context) {
@@ -177,7 +180,8 @@ class MainState(private val context: Context) {
                             label = runCatching { pm.getApplicationLabel(info).toString() }
                                 .getOrDefault(info.packageName),
                             enabled = info.packageName in enabled,
-                            scriptBytes = sizes[info.packageName] ?: 0L
+                            scriptBytes = sizes[info.packageName] ?: 0L,
+                            scope = AgentStore.scope(context, info.packageName)
                         )
                     }
                     .sortedBy { it.label.lowercase() }
@@ -257,6 +261,16 @@ class MainState(private val context: Context) {
         } catch (t: Throwable) {
             AppLog.error("启动注入：保存 $pkg 失败 ${t.message ?: t.javaClass.simpleName}")
             toast("保存失败：${t.message}")
+        }
+    }
+
+    suspend fun setAgentScope(pkg: String, allProcesses: Boolean) {
+        val scope = if (allProcesses) AgentStore.SCOPE_ALL else AgentStore.SCOPE_MAIN
+        try {
+            withContext(Dispatchers.IO) { frida.setAgentScope(pkg, scope) }
+            agents = agents.map { if (it.packageName == pkg) it.copy(scope = scope) else it }
+        } catch (t: Throwable) {
+            toast("设置失败：${t.message}")
         }
     }
 

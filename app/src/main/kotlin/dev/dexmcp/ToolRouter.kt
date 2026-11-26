@@ -162,7 +162,7 @@ class ToolRouter(private val context: Context) {
             tool("android_frida_run", "Start dynamic analysis: optionally restart the target app, attach or spawn it with Frida and load a JavaScript file. Returns a session_id plus the first console output. Root is required. console.log output is captured; use Java.perform/Java.use for Java hooks.", mapOf(
                 "package" to stringSchema("Target package name"),
                 "script" to stringSchema("Complete JavaScript source for this session"),
-                "process" to stringSchema("Optional process name such as com.app:push; default is the app main process"),
+                "process" to stringSchema("Exact process name for attach, such as com.app:push; defaults to the main process"),
                 "name" to stringSchema("Script filename inside the session; default hook.js"),
                 "mode" to enumSchema("attach", "spawn"),
                 "runtime" to enumSchema("qjs", "v8"),
@@ -192,10 +192,15 @@ class ToolRouter(private val context: Context) {
                 "wait_ms" to integerSchema("Milliseconds to wait for the process, 500-30000")
             ), listOf("package")),
             tool("android_frida_agent_scripts", "List startup scripts used by the LSPosed hook: when a selected app launches, Dex MCP attaches Frida and loads /data/adb/dexmcp/agents/<package>.js before the app continues.", emptyMap()),
-            tool("android_frida_agent_set", "Create or replace the startup script for a package and enable it. The LSPosed hook injects it on the next launch of that app.", mapOf(
+            tool("android_frida_agent_set", "Create or replace the startup script for a package and enable it. The LSPosed hook injects it on the next launch of that app. Optional scope picks main process only (default) or every process of the package.", mapOf(
                 "package" to stringSchema("Target package name"),
-                "script" to stringSchema("JavaScript source, same API as android_frida_run")
+                "script" to stringSchema("JavaScript source, same API as android_frida_run"),
+                "scope" to enumSchema("main", "all")
             ), listOf("package", "script")),
+            tool("android_frida_agent_scope", "Choose whether a package's startup script is injected into the main process only (main, default) or into every process of the package (all).", mapOf(
+                "package" to stringSchema("Target package name"),
+                "scope" to enumSchema("main", "all")
+            ), listOf("package", "scope")),
             tool("android_frida_agent_delete", "Delete the startup script for a package and turn its startup injection off.", mapOf(
                 "package" to stringSchema("Target package name")
             ), listOf("package")),
@@ -266,9 +271,18 @@ class ToolRouter(private val context: Context) {
                 "android_frida_sessions" -> frida.list()
                 "android_frida_restart_app" -> frida.restart(args)
                 "android_frida_agent_scripts" -> frida.listAgentScripts()
-                "android_frida_agent_set" -> frida.setAgentScript(
+                "android_frida_agent_set" -> {
+                    val pkg = args.getString("package").trim()
+                    val result = frida.setAgentScript(pkg, args.getString("script"))
+                    args.optString("scope").trim().takeIf { it.isNotEmpty() }?.let { scope ->
+                        frida.setAgentScope(pkg, scope)
+                        result.put("scope", scope)
+                    }
+                    result
+                }
+                "android_frida_agent_scope" -> frida.setAgentScope(
                     args.getString("package").trim(),
-                    args.getString("script")
+                    args.getString("scope").trim()
                 )
                 "android_frida_agent_delete" -> frida.deleteAgentScript(args.getString("package").trim())
                 "android_frida_agent_enable" -> frida.setAgentEnabled(

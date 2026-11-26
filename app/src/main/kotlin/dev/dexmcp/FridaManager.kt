@@ -198,7 +198,7 @@ class FridaManager private constructor(private val context: Context) {
     @Synchronized
     fun run(args: JSONObject): JSONObject {
         val pkg = args.optString("package").trim()
-        require(pkg.isNotEmpty()) { "package is required" }
+        require(pkg.matches(Regex("[A-Za-z][A-Za-z0-9_.]*"))) { "Invalid package name" }
         require(pkg != appContext.packageName) { "Cannot instrument Dex MCP itself" }
         val script = args.optString("script")
         require(script.isNotBlank()) { "script is required" }
@@ -207,6 +207,10 @@ class FridaManager private constructor(private val context: Context) {
         val runtime = args.optString("runtime", "qjs")
         require(runtime == "qjs" || runtime == "v8") { "runtime must be qjs or v8" }
         val processName = args.optString("process").trim()
+        require(processName.isEmpty() || processName.matches(Regex("[A-Za-z_][A-Za-z0-9_.:]*"))) {
+            "process must be a process name, not a PID"
+        }
+        require(mode == "attach" || processName.isEmpty()) { "process is only supported in attach mode" }
         val scriptName = sanitizeScriptName(args.optString("name", "hook.js"))
         val restart = if (args.has("restart")) args.optBoolean("restart") else !isSystemPackage(pkg)
         val waitMs = args.optLong("wait_ms", 2_500).coerceIn(300, 30_000)
@@ -245,13 +249,12 @@ class FridaManager private constructor(private val context: Context) {
                     if (restart) RootRunner.run("am force-stop '$pkg' 2>/dev/null || true", 20_000)
                     null
                 }
-                processName.isNotEmpty() -> {
-                    if (restart) restartApp(pkg, 8_000)
-                    waitForProcess(processName, waitMs)
-                }
                 else -> {
-                    val running = findPid(pkg)
-                    if (restart || running == null) restartApp(pkg, 8_000) else running
+                    val mainPid = if (restart) restartApp(pkg, 8_000) else null
+                    val target = processTarget(session)
+                    (if (processName.isEmpty()) mainPid else null)
+                        ?: waitForProcess(target, waitMs)
+                        ?: error("Process $target is not running; start it manually and retry with restart=false")
                 }
             }
             session.pid = pid ?: 0
@@ -265,24 +268,15 @@ class FridaManager private constructor(private val context: Context) {
             val state = probe(session)
             val chunk = readLog(session, 0, 262_144, state.logSize)
             val result = describe(session, chunk, state)
-            val selinuxFailure = chunk.text.contains("Unable to save SELinux policy") ||
-                chunk.text.contains("Unable to load SELinux policy") ||
-                chunk.text.contains("unlabeled") ||
-                chunk.text.contains("Agent connection closed")
-            if (selinuxFailure) {
-                result.put("error", "selinux_patch_failed")
-                result.put(
-                    "hint",
-                    "frida-inject could not patch the SELinux policy before attaching; this is an environment " +
-                        "problem, not a script error. Call android_system_selinux with state=permissive, then " +
-                        "android_frida_reload, and restore state=enforcing afterwards."
-                )
-                result.put(
-                    "troubleshoot",
-                    "SELinux policy patching failed. Call android_system_selinux with state=permissive, " +
-                        "then android_frida_reload; restore state=enforcing when finished."
-                )
+            val failure = when {
+                chunk.text.contains("backend_class != null") -> "frida_helper_failed"
+                chunk.text.contains("Unable to save SELinux policy") ||
+                    chunk.text.contains("Unable to load SELinux policy") -> "selinux_patch_failed"
+                chunk.text.contains("Timeout was reached") -> "frida_timeout"
+                result.optInt("exit_code", 0) != 0 -> "injector_exited"
+                else -> null
             }
+            if (failure != null) result.put("error", failure)
             return result
         } catch (t: Throwable) {
             session.note = t.message ?: t.javaClass.simpleName
@@ -313,7 +307,8 @@ class FridaManager private constructor(private val context: Context) {
             restartApp(session.packageName, 8_000)
             pid = waitForProcess(processTarget(session), 5_000)
         }
-        session.pid = pid ?: 0
+        require(pid != null) { "Target process ${processTarget(session)} is not running" }
+        session.pid = pid
         session.stopped = false
         session.note = null
         session.updatedAt = now()
@@ -362,7 +357,7 @@ class FridaManager private constructor(private val context: Context) {
 
     fun restart(args: JSONObject): JSONObject {
         val pkg = args.optString("package").trim()
-        require(pkg.isNotEmpty()) { "package is required" }
+        require(pkg.matches(Regex("[A-Za-z][A-Za-z0-9_.]*"))) { "Invalid package name" }
         require(pkg != appContext.packageName) { "Cannot restart Dex MCP itself" }
         ensureArm64()
         installedApp(pkg)
@@ -435,7 +430,8 @@ class FridaManager private constructor(private val context: Context) {
                 jsonObject(
                     "package" to pkg,
                     "bytes" to (parts.getOrNull(1)?.toLongOrNull() ?: 0L),
-                    "enabled" to (pkg in enabled)
+                    "enabled" to (pkg in enabled),
+                    "scope" to AgentStore.scope(appContext, pkg)
                 )
             )
         }
@@ -457,6 +453,20 @@ class FridaManager private constructor(private val context: Context) {
         if (result.exitCode != 0) return null
         val text = String(result.stdout, Charsets.UTF_8)
         return text.takeIf { it.isNotEmpty() }
+    }
+
+    fun setAgentScope(pkg: String, scope: String): JSONObject {
+        requirePackage(pkg)
+        require(scope == AgentStore.SCOPE_MAIN || scope == AgentStore.SCOPE_ALL) {
+            "scope must be ${AgentStore.SCOPE_MAIN} or ${AgentStore.SCOPE_ALL}"
+        }
+        AgentStore.setScope(appContext, pkg, scope)
+        AppLog.info("Frida: 启动注入范围 $pkg -> $scope")
+        return jsonObject(
+            "package" to pkg,
+            "scope" to scope,
+            "has_script" to hasAgentScript(pkg)
+        )
     }
 
     fun setAgentEnabled(pkg: String, enabled: Boolean): JSONObject {
@@ -518,7 +528,7 @@ class FridaManager private constructor(private val context: Context) {
         val script = RootRunner.run("toybox cat '$AGENTS_DIR/$pkg.js' 2>/dev/null", 30_000).stdout
         require(script.isNotEmpty()) { "No startup script for $pkg" }
 
-        // Only one main process per package can be alive; older startup sessions are stale.
+        // Keep live sessions; only retire exited startup injectors.
         retireSessions(pkg, pid)
 
         val id = newId()
@@ -659,6 +669,7 @@ class FridaManager private constructor(private val context: Context) {
             "script" to "${session.dir}/${session.scriptName}",
             "log" to "${session.dir}/output.log",
             "running" to running,
+            "runtime_ready_in_output" to (chunk?.text?.contains("[dexmcp] ready") == true),
             "exit_code" to exitCode,
             "launcher" to launcher,
             "log_bytes" to state.logSize,
@@ -698,7 +709,6 @@ class FridaManager private constructor(private val context: Context) {
     private fun launch(session: FridaSession, pid: Int?, forceAttach: Boolean = false) {
         val target = when {
             session.mode == "spawn" && !forceAttach -> "-f ${session.packageName}"
-            session.processName.isNotEmpty() -> "-n ${session.processName}"
             else -> {
                 require(pid != null && pid > 0) { "Target process is not running" }
                 "-p $pid"
@@ -787,12 +797,13 @@ class FridaManager private constructor(private val context: Context) {
         return sessions[id] ?: error("Unknown session_id: $id")
     }
 
-    /** Mark older startup sessions of a package as stopped before attaching to a new process. */
+    /** Retire only exited startup sessions. */
     private fun retireSessions(pkg: String, keepPid: Int) {
         var changed = false
         for (session in sessions.values) {
             if (!session.stopped && session.packageName == pkg &&
-                session.scriptName == "startup.js" && session.pid != keepPid
+                session.scriptName == "startup.js" && session.pid != keepPid &&
+                !probe(session).agentAlive && live[session.id]?.isAlive != true
             ) {
                 session.stopped = true
                 session.updatedAt = now()
@@ -909,19 +920,20 @@ class FridaManager private constructor(private val context: Context) {
             val parts = trimmed.split(Regex("\\s+"), limit = 2)
             if (parts.size < 2) continue
             val pid = parts[0].toIntOrNull() ?: continue
-            if (parts[1].trim() == pkg) return pid
+            if (parts[1].trim() == pkg && readProcessName(pid) == pkg) return pid
         }
         val candidates = RootRunner.run("pidof '$pkg' 2>/dev/null", 15_000).text.trim()
             .split(Regex("\\s+")).mapNotNull { it.toIntOrNull() }.take(4)
         for (candidate in candidates) {
-            val name = RootRunner.run(
-                "toybox cat /proc/$candidate/cmdline 2>/dev/null | toybox tr '\\0' '\\n' | toybox head -n 1",
-                15_000
-            ).text.trim()
-            if (name == pkg) return candidate
+            if (readProcessName(candidate) == pkg) return candidate
         }
-        return candidates.firstOrNull()
+        return null
     }
+
+    private fun readProcessName(pid: Int): String = RootRunner.run(
+        "toybox cat /proc/$pid/cmdline 2>/dev/null",
+        3_000
+    ).text.substringBefore('\u0000')
 
     private fun launchComponent(pkg: String): String? {
         val intent = runCatching { appContext.packageManager.getLaunchIntentForPackage(pkg) }.getOrNull()
