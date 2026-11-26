@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.4.13
+
+- 启动注入支持按包选择范围：默认只注入主进程，设为 `all` 后该包的每个进程（如 `com.google.android.gms.unstable`）都在启动时加载同一个脚本。MCP 用 `android_frida_agent_scope`，App 里是脚本页的「注入所有进程」开关。
+- `InjectProvider` 校验 Binder 调用方 PID 和 UID，只接受目标包自己的进程；返回值区分 `runtime_ready` 和 `runtime_not_confirmed`。
+- `android_frida_run` 的 `process` 只接受完整进程名，Dex MCP 自己查 PID；`restart=false` 不再自动拉起未运行的应用。
+- 附加失败分类为 `frida_helper_failed`、`selinux_patch_failed`、`frida_timeout`、`injector_exited`，不再建议为一般附加失败切 SELinux。
+- 启动注入会话按进程区分，不再因为同包另一个进程启动就把还活着的会话标记为已停止。
+
 ## 0.4.12
 
 - 默认允许读取 `/data/adb`、`/mnt/opex`、`/mnt/oplus`、`/mnt/vendor` 和 `/system_dlkm`，方便诊断 KernelSU 模块和厂商组件。
