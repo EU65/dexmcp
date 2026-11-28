@@ -16,8 +16,8 @@
 
 内置的 frida-inject 改成了读 `/data/adb/dexmcp/pol`、写 `/data/adb/dexmcp/ld`，两个都由 App 控制：
 
-- **KSU 模式（默认）**：`pol` 不存在，frida 直接跳过自己的 policy patch；规则由 `ksud sepolicy apply` 在运行时写进内核策略（每个 boot 一次），`ld` 指向 `/dev/null`，不会重载。
-- **兼容模式**：`pol` 和 `ld` 指回真实节点，行为和上游 Frida 一样（会重载 policy）。
+- **KSU 模式（默认）**：安装运行时时同时安装 KernelSU 模块 `dexmcp_sepolicy`（`/data/adb/modules/dexmcp_sepolicy`），`pol` 不存在，frida 直接跳过自己的 policy patch；规则由 `ksud sepolicy apply` 立即写入内核策略，重启后由模块的 `sepolicy.rule` 再次应用，`ld` 指向 `/dev/null`，不会重载。
+- **兼容模式**：给模块写 `disable`（重启后不再加载），`pol` 和 `ld` 指回真实节点，行为和上游 Frida 一样（会重载 policy）。卸载运行时会删掉模块。
 
 `android_frida_prepare` 会顺带应用规则并返回 `selinux` 字段（`mode` / `applied` / `error`）；也可以用 `selinux_mode=ksu|compat` 切换。应用规则失败时会自动回退到兼容模式并写入运行日志。App 的 Frida 区也有「SELinux 策略」开关。
 

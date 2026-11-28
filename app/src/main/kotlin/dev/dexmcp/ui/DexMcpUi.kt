@@ -424,7 +424,7 @@ private fun FridaSection(state: MainState, scope: CoroutineScope, onUninstall: (
         HorizontalDivider()
         BasicComponent(
             title = "SELinux 策略",
-            summary = if (state.fridaSelinuxMode == "ksu") "由 KernelSU 应用规则，不重载策略" else "Frida 自行加载策略（兼容）",
+            summary = if (state.fridaSelinuxMode == "ksu") "KernelSU 模块 + 运行时规则，不重载策略" else "Frida 自行加载策略（兼容，不装模块）",
             endActions = {
                 Switch(
                     checked = state.fridaSelinuxMode == "ksu",

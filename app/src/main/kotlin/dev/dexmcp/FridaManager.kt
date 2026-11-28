@@ -43,6 +43,18 @@ class FridaManager private constructor(private val context: Context) {
         const val SELINUX_RULE_FILE = "$BASE_DIR/frida-sepolicy.rule"
         const val SELINUX_MARKER = "$BASE_DIR/sepolicy.boot"
 
+        /** KernelSU module that re-applies the rules after every reboot. */
+        const val SEPOLICY_MODULE_ID = "dexmcp_sepolicy"
+        const val SEPOLICY_MODULE_DIR = "/data/adb/modules/dexmcp_sepolicy"
+        private val SEPOLICY_MODULE_PROP = """
+            id=dexmcp_sepolicy
+            name=Dex MCP Frida SELinux
+            version=1.0
+            versionCode=1
+            author=dexmcp
+            description=Frida SELinux rules for Dex MCP (applied by KernelSU)
+        """.trimIndent() + "\n"
+
         /**
          * Same rules frida's own frida_selinux_patch_policy() would add. KernelSU's
          * `ksud sepolicy apply` inserts them into the live policy without reloading it.
@@ -236,13 +248,16 @@ class FridaManager private constructor(private val context: Context) {
         // Default: frida-inject's policy read and write both miss the kernel nodes.
         sh("rm -f '$SELINUX_POLICY_LINK'; ln -sf /dev/null '$SELINUX_LINK'")
         val result = if (ServerConfig.fridaSelinuxMode(appContext) == "compat") {
+            disableSepolicyModule()
             useFridaPolicyLoad()
             jsonObject(
                 "mode" to "compat",
                 "applied" to false,
+                "module" to sepolicyModuleInstalled(),
                 "hint" to "frida-inject will reload the SELinux policy before attaching."
             )
         } else {
+            installSepolicyModule()
             applyKsuSepolicy()
         }
         selinuxPrepared = result
@@ -254,6 +269,29 @@ class FridaManager private constructor(private val context: Context) {
         sh("ln -sf /sys/fs/selinux/policy '$SELINUX_POLICY_LINK'")
         sh("ln -sf /sys/fs/selinux/load '$SELINUX_LINK'")
     }
+
+    private fun installSepolicyModule() {
+        sh("mkdir -p '$SEPOLICY_MODULE_DIR' && chmod 755 '$SEPOLICY_MODULE_DIR'")
+        writeFile("$SEPOLICY_MODULE_DIR/module.prop", SEPOLICY_MODULE_PROP)
+        writeFile("$SEPOLICY_MODULE_DIR/sepolicy.rule", SEPOLICY_RULES)
+        sh("chmod 644 '$SEPOLICY_MODULE_DIR/module.prop' '$SEPOLICY_MODULE_DIR/sepolicy.rule'; " +
+            "rm -f '$SEPOLICY_MODULE_DIR/disable'")
+    }
+
+    /** KernelSU skips a module with a `disable` file; used when the user prefers the legacy path. */
+    private fun disableSepolicyModule() {
+        sh("mkdir -p '$SEPOLICY_MODULE_DIR' && toybox touch '$SEPOLICY_MODULE_DIR/disable'")
+    }
+
+    private fun removeSepolicyModule() {
+        sh("rm -rf '$SEPOLICY_MODULE_DIR'")
+    }
+
+    fun sepolicyModuleInstalled(): Boolean =
+        RootRunner.run("test -f '$SEPOLICY_MODULE_DIR/module.prop'", 5_000).exitCode == 0
+
+    fun sepolicyModuleDisabled(): Boolean =
+        RootRunner.run("test -f '$SEPOLICY_MODULE_DIR/disable'", 5_000).exitCode == 0
 
     /**
      * Called before any frida-inject execution (including --version probes): until the real mode is
@@ -271,7 +309,7 @@ class FridaManager private constructor(private val context: Context) {
         val bootId = RootRunner.run("cat /proc/sys/kernel/random/boot_id 2>/dev/null", 5_000).text.trim()
         val marker = RootRunner.run("cat '$SELINUX_MARKER' 2>/dev/null", 5_000).text.trim()
         if (bootId.isNotEmpty() && marker == bootId) {
-            return jsonObject("mode" to "ksu", "applied" to true, "cached" to true, "boot_id" to bootId)
+            return jsonObject("mode" to "ksu", "applied" to true, "cached" to true, "boot_id" to bootId, "module" to true)
         }
         val command = "KS=\$(command -v ksud 2>/dev/null); " +
             "[ -n \"\$KS\" ] || KS=/data/adb/ksu/bin/ksud; " +
@@ -280,15 +318,17 @@ class FridaManager private constructor(private val context: Context) {
         val result = RootRunner.run(command, 60_000)
         if (result.exitCode == 0) {
             runCatching { writeFile(SELINUX_MARKER, bootId) }
-            AppLog.info("Frida: 已通过 KernelSU 应用 SELinux 规则（boot $bootId）")
-            return jsonObject("mode" to "ksu", "applied" to true, "cached" to false, "boot_id" to bootId)
+            AppLog.info("Frida: 已安装 SELinux 模块并通过 KernelSU 应用规则（boot $bootId）")
+            return jsonObject("mode" to "ksu", "applied" to true, "cached" to false, "boot_id" to bootId, "module" to true)
         }
+        disableSepolicyModule()
         useFridaPolicyLoad()
         val error = result.text.trim().ifEmpty { "ksud exited with ${result.exitCode}" }
         AppLog.warn("Frida: KernelSU 规则应用失败，回退到 Frida 自行加载策略：$error")
         return jsonObject(
             "mode" to "compat",
             "applied" to false,
+            "module" to sepolicyModuleInstalled(),
             "error" to error,
             "hint" to "Rules were not applied; frida-inject reloads the SELinux policy before attaching."
         )
@@ -746,7 +786,9 @@ class FridaManager private constructor(private val context: Context) {
             "running_sessions" to items.count { it.optBoolean("running") },
             "selinux" to selinux,
             "selinux_mode" to ServerConfig.fridaSelinuxMode(appContext),
-            "selinux_applied" to (selinuxPrepared?.optBoolean("applied") ?: false)
+            "selinux_applied" to (selinuxPrepared?.optBoolean("applied") ?: false),
+            "sepolicy_module" to if (root) sepolicyModuleInstalled() else false,
+            "sepolicy_module_disabled" to if (root) sepolicyModuleDisabled() else false
         )
     }
 
@@ -772,6 +814,7 @@ class FridaManager private constructor(private val context: Context) {
         sessions.values.toList().forEach { session -> runCatching { stopInjector(session) } }
         sessions.clear()
         persist()
+        removeSepolicyModule()
         val result = RootRunner.run("rm -rf '$BASE_DIR'", 60_000)
         check(result.exitCode == 0) {
             "Cannot remove $BASE_DIR: ${(result.text + " " + result.stderr).trim()}"

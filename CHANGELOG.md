@@ -8,7 +8,8 @@
 - 附加失败分类为 `frida_helper_failed`、`selinux_patch_failed`、`frida_timeout`、`injector_exited`，不再建议为一般附加失败切 SELinux。
 - 启动注入会话按进程区分，不再因为同包另一个进程启动就把还活着的会话标记为已停止。
 - 内置 frida-inject 不再自己重载 SELinux policy：读/写路径改到 `/data/adb/dexmcp` 下的可控文件，默认跳过 Frida 的 policy patch。
-- 新增 KSU 模式：用 `ksud sepolicy apply` 把 Frida 需要的规则运行时写入内核策略（每个 boot 一次），兼容 KernelSU 的 selinux_hide。
+- 安装运行时时默认安装 KernelSU 模块 `dexmcp_sepolicy`（`module.prop` + `sepolicy.rule`），并用 `ksud sepolicy apply` 立即生效；重启后由模块重新应用。
+- 选择兼容模式时给模块写 `disable` 并从 frida 自身加载策略；卸载运行时会删除该模块。
 - App 的 Frida 区新增「SELinux 策略」开关；`android_frida_prepare` 支持 `selinux_mode=ksu|compat`，应用失败时自动回退兼容模式并报错。
 
 ## 0.4.12
