@@ -45,6 +45,23 @@ object ServerConfig {
             .putBoolean("frida_autostart", enabled).apply()
     }
 
+    /**
+     * How frida-inject gets its SELinux permissions: "ksu" lets KernelSU apply a rule file at
+     * runtime (no policy reload); "compat" redirects frida-inject back to the real
+     * /sys/fs/selinux/load node, which reloads the policy like upstream Frida does.
+     */
+    fun fridaSelinuxMode(context: Context): String =
+        context.getSharedPreferences("mcp", Context.MODE_PRIVATE)
+            .getString("frida_selinux_mode", "ksu")
+            ?.takeIf { it == "ksu" || it == "compat" }
+            ?: "ksu"
+
+    fun setFridaSelinuxMode(context: Context, mode: String) {
+        require(mode == "ksu" || mode == "compat") { "mode must be ksu or compat" }
+        context.getSharedPreferences("mcp", Context.MODE_PRIVATE).edit()
+            .putString("frida_selinux_mode", mode).apply()
+    }
+
     fun allowRemote(context: Context): Boolean =
         context.getSharedPreferences("mcp", Context.MODE_PRIVATE).getBoolean("allow_remote", false)
 

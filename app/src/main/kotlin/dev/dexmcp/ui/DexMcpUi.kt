@@ -422,6 +422,17 @@ private fun FridaSection(state: MainState, scope: CoroutineScope, onUninstall: (
             }
         )
         HorizontalDivider()
+        BasicComponent(
+            title = "SELinux 策略",
+            summary = if (state.fridaSelinuxMode == "ksu") "由 KernelSU 应用规则，不重载策略" else "Frida 自行加载策略（兼容）",
+            endActions = {
+                Switch(
+                    checked = state.fridaSelinuxMode == "ksu",
+                    onCheckedChange = { scope.launch { state.setSelinuxMode(it) } }
+                )
+            }
+        )
+        HorizontalDivider()
         CardActions {
             Button(
                 onClick = { scope.launch { state.installFrida(force = installed != null) } },

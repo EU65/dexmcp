@@ -18,6 +18,10 @@ Patched:
   * "/data/local/tmp/frida-helper-"   -> "/data/adb/dexmcp/helper-" (root-only dir)
   * "/data/local/tmp" (temp dir used for the control pipe when running as root)
                                       -> "/data/adb"
+  * "/sys/fs/selinux/load"            -> "/data/adb/dexmcp/ld" (the App points this at
+                                         /dev/null and applies the rules through KernelSU,
+                                         so frida-inject never reloads the SELinux policy;
+                                         compat mode points it back at the real node)
 
 Usage:
   python tools/patch-frida.py app/src/main/assets/frida/frida-inject
@@ -41,6 +45,10 @@ HELPER_PATH = b"/data/local/tmp/frida-helper-"
 TMP_PATH = b"/data/local/tmp"
 NEW_HELPER_PATH = b"/data/adb/dexmcp/helper-"
 NEW_TMP_PATH = b"/data/adb"
+SELINUX_LOAD = b"/sys/fs/selinux/load"
+NEW_SELINUX_LOAD = b"/data/adb/dexmcp/ld"
+SELINUX_POLICY = b"/sys/fs/selinux/policy"
+NEW_SELINUX_POLICY = b"/data/adb/dexmcp/pol"
 AGENT_ONLY = [b"FridaScriptEngine", b"GLib-GIO", b"GDBusProxy", b"GumScript"]
 
 ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -269,6 +277,8 @@ def main():
     apply(replace_nul_terminated, b"gdbus", gdbus, "gdbus")
     apply(replace_equal, HELPER_PATH, NEW_HELPER_PATH, "helper path")
     apply(replace_nul_terminated, TMP_PATH, NEW_TMP_PATH, "temp path")
+    apply(replace_nul_terminated, SELINUX_LOAD, NEW_SELINUX_LOAD, "selinux policy load")
+    apply(replace_nul_terminated, SELINUX_POLICY, NEW_SELINUX_POLICY, "selinux policy read")
 
     regions = find_agent_regions(bytes(data))
     reversed_hits = 0

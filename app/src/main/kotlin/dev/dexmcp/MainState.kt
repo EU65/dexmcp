@@ -56,6 +56,7 @@ class MainState(private val context: Context) {
     var fridaError by mutableStateOf<String?>(null)
     var fridaBusy by mutableStateOf<String?>(null)
     var autostartEnabled by mutableStateOf(ServerConfig.autostartEnabled(context))
+    var fridaSelinuxMode by mutableStateOf(ServerConfig.fridaSelinuxMode(context))
     var agentScripts by mutableStateOf(0)
     var agentEnabled by mutableStateOf(0)
     var selinux by mutableStateOf("")
@@ -151,6 +152,17 @@ class MainState(private val context: Context) {
         autostartEnabled = enabled
         ServerConfig.setAutostartEnabled(context, enabled)
         AppLog.info("设置：启动注入 ${if (enabled) "已启用" else "已关闭"}")
+    }
+
+    suspend fun setSelinuxMode(useKsu: Boolean) {
+        val mode = if (useKsu) "ksu" else "compat"
+        fridaSelinuxMode = mode
+        ServerConfig.setFridaSelinuxMode(context, mode)
+        AppLog.info("设置：SELinux 模式 $mode")
+        val result = withContext(Dispatchers.IO) { runCatching { frida.prepareSelinux(force = true) }.getOrNull() }
+        val error = result?.optString("error")?.takeIf { it.isNotBlank() }
+        if (error != null) toast("KernelSU 规则应用失败：$error")
+        refreshFrida()
     }
 
     suspend fun loadAgents() {

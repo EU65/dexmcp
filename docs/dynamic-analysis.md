@@ -10,6 +10,19 @@
 
 脚本可直接使用 `Java.perform` 和 `Java.use`。失败时先看返回的 `error` 和 `output`。`running` 只表示注入器存活；`[dexmcp] ready` 只表示脚本运行时已就绪，不代表用户脚本或 Java hook 安装成功。`frida_helper_failed`、`frida_timeout` 和 `selinux_patch_failed` 分开报告，不建议为一般附加失败切换 SELinux 模式。
 
+## SELinux 策略
+
+上游 frida-inject 每次启动都会读 `/sys/fs/selinux/policy`、加上自己的规则再写 `/sys/fs/selinux/load`，等于热重载一次 SELinux policy。在 KernelSU 上这会扰动 `selinux_hide` 的备份策略和状态页，也不是模块化的做法。
+
+内置的 frida-inject 改成了读 `/data/adb/dexmcp/pol`、写 `/data/adb/dexmcp/ld`，两个都由 App 控制：
+
+- **KSU 模式（默认）**：`pol` 不存在，frida 直接跳过自己的 policy patch；规则由 `ksud sepolicy apply` 在运行时写进内核策略（每个 boot 一次），`ld` 指向 `/dev/null`，不会重载。
+- **兼容模式**：`pol` 和 `ld` 指回真实节点，行为和上游 Frida 一样（会重载 policy）。
+
+`android_frida_prepare` 会顺带应用规则并返回 `selinux` 字段（`mode` / `applied` / `error`）；也可以用 `selinux_mode=ksu|compat` 切换。应用规则失败时会自动回退到兼容模式并写入运行日志。App 的 Frida 区也有「SELinux 策略」开关。
+
+规则内容就是 Frida 自己会加的那组：`frida_file` / `frida_memfd` 两个类型、`allow domain domain:process execmem`、对 `frida_file` 的读写执行、`domain -> ksu` 的 fd/socket 访问，以及几个 zygote 相关规则。它们只在本次 boot 内有效，重启后由 App 在下次使用 Frida 时重新应用。
+
 关闭「允许 MCP 调用 Frida」会拒绝 `android_frida_*` 工具调用并结束运行中的会话。App 里的运行时安装和卸载仍可用。
 
 ## LSPosed 启动注入

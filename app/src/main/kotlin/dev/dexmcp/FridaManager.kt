@@ -27,11 +27,44 @@ class FridaManager private constructor(private val context: Context) {
          * anti-detection). The flavor marker makes an existing stock 17.26.2 install
          * look outdated, so it gets replaced on first use after an app update.
          */
-        const val RUNTIME_FLAVOR = "florida-1"
+        const val RUNTIME_FLAVOR = "florida-2"
         const val BASE_DIR = "/data/adb/dexmcp"
         const val AGENTS_DIR = "$BASE_DIR/agents"
         const val BINARY = "$BASE_DIR/frida-inject"
         const val SESSIONS_DIR = "$BASE_DIR/sessions"
+
+        /**
+         * frida-inject's SELinux policy load is redirected here by tools/patch-frida.py.
+         * The App points this path at /dev/null (KernelSU applied the rules once at runtime)
+         * or at /sys/fs/selinux/load (compat mode, upstream behaviour).
+         */
+        const val SELINUX_LINK = "$BASE_DIR/ld"
+        const val SELINUX_POLICY_LINK = "$BASE_DIR/pol"
+        const val SELINUX_RULE_FILE = "$BASE_DIR/frida-sepolicy.rule"
+        const val SELINUX_MARKER = "$BASE_DIR/sepolicy.boot"
+
+        /**
+         * Same rules frida's own frida_selinux_patch_policy() would add. KernelSU's
+         * `ksud sepolicy apply` inserts them into the live policy without reloading it.
+         */
+        private val SEPOLICY_RULES = """
+            type frida_file { file_type mlstrustedobject }
+            type frida_memfd { file_type mlstrustedobject }
+            allow domain domain process execmem
+            allow domain frida_file dir search
+            allow domain frida_file file { open read getattr execute map }
+            allow domain frida_memfd file { open read write getattr execute map }
+            allow domain shell_data_file dir search
+            allow domain zygote_exec file execute
+            allow domain ksu process sigchld
+            allow domain ksu fd use
+            allow domain ksu unix_stream_socket { connectto read write getattr getopt }
+            allow domain ksu tcp_socket { read write getattr getopt }
+            allow zygote zygote capability sys_ptrace
+            allow app_zygote zygote_exec file read
+            allow system_server apex_art_data_file file execute
+        """.trimIndent() + "\n"
+
         private const val ASSET = "frida/frida-inject"
         private const val BRIDGE_ASSET = "frida/bridge.js"
         private val ANSI = Regex("\u001b\\[[0-9;]*[A-Za-z]")
@@ -134,6 +167,10 @@ class FridaManager private constructor(private val context: Context) {
     private val sessions = LinkedHashMap<String, FridaSession>()
     private var loaded = false
 
+    /** Cached result of prepareSelinux(); SELinux rules are per-boot, so a process cache is enough. */
+    @Volatile
+    private var selinuxPrepared: JSONObject? = null
+
     /** Packages whose process was (re)started by an MCP tool a moment ago. */
     private val manualStarts = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -175,8 +212,85 @@ class FridaManager private constructor(private val context: Context) {
             "autostart_enabled" to ServerConfig.autostartEnabled(appContext),
             "agent_enabled" to AgentStore.count(appContext),
             "agent_script_count" to runCatching { agentScriptCount() }.getOrDefault(0),
+            "selinux" to (selinuxPrepared ?: jsonObject("mode" to ServerConfig.fridaSelinuxMode(appContext))),
             "session_count" to items.size,
             "sessions" to JSONArray(items)
+        )
+    }
+
+    /**
+     * Make frida-inject run without reloading the SELinux policy.
+     *
+     * "ksu" (default): KernelSU's ksud inserts the equivalent rules into the live policy once per
+     * boot; [SELINUX_LINK] points at /dev/null so frida's own policy write is discarded.
+     * "compat": points the link back at /sys/fs/selinux/load, which is upstream Frida behaviour
+     * (full policy reload). If ksud is missing or rejects the rules, this falls back to compat so
+     * injection keeps working, and reports why.
+     */
+    @Synchronized
+    fun prepareSelinux(force: Boolean = false): JSONObject {
+        val cached = selinuxPrepared
+        if (!force && cached != null) return cached
+        requireRoot()
+        sh("mkdir -p '$BASE_DIR' && chmod 700 '$BASE_DIR'")
+        // Default: frida-inject's policy read and write both miss the kernel nodes.
+        sh("rm -f '$SELINUX_POLICY_LINK'; ln -sf /dev/null '$SELINUX_LINK'")
+        val result = if (ServerConfig.fridaSelinuxMode(appContext) == "compat") {
+            useFridaPolicyLoad()
+            jsonObject(
+                "mode" to "compat",
+                "applied" to false,
+                "hint" to "frida-inject will reload the SELinux policy before attaching."
+            )
+        } else {
+            applyKsuSepolicy()
+        }
+        selinuxPrepared = result
+        return result
+    }
+
+    /** Point frida-inject's policy paths back at the kernel (upstream behaviour). */
+    private fun useFridaPolicyLoad() {
+        sh("ln -sf /sys/fs/selinux/policy '$SELINUX_POLICY_LINK'")
+        sh("ln -sf /sys/fs/selinux/load '$SELINUX_LINK'")
+    }
+
+    /**
+     * Called before any frida-inject execution (including --version probes): until the real mode is
+     * prepared, make sure a policy write cannot reach the kernel and a policy read finds nothing.
+     */
+    @Synchronized
+    private fun ensureSelinuxSafePaths() {
+        if (selinuxPrepared != null) return
+        runCatching { sh("rm -f '$SELINUX_POLICY_LINK'; ln -sf /dev/null '$SELINUX_LINK'") }
+    }
+
+    private fun applyKsuSepolicy(): JSONObject {
+        writeFile(SELINUX_RULE_FILE, SEPOLICY_RULES)
+        sh("chmod 600 '$SELINUX_RULE_FILE'")
+        val bootId = RootRunner.run("cat /proc/sys/kernel/random/boot_id 2>/dev/null", 5_000).text.trim()
+        val marker = RootRunner.run("cat '$SELINUX_MARKER' 2>/dev/null", 5_000).text.trim()
+        if (bootId.isNotEmpty() && marker == bootId) {
+            return jsonObject("mode" to "ksu", "applied" to true, "cached" to true, "boot_id" to bootId)
+        }
+        val command = "KS=\$(command -v ksud 2>/dev/null); " +
+            "[ -n \"\$KS\" ] || KS=/data/adb/ksu/bin/ksud; " +
+            "[ -x \"\$KS\" ] || { echo 'ksud not found' >&2; exit 127; }; " +
+            "\"\$KS\" sepolicy apply '$SELINUX_RULE_FILE' 2>&1"
+        val result = RootRunner.run(command, 60_000)
+        if (result.exitCode == 0) {
+            runCatching { writeFile(SELINUX_MARKER, bootId) }
+            AppLog.info("Frida: 已通过 KernelSU 应用 SELinux 规则（boot $bootId）")
+            return jsonObject("mode" to "ksu", "applied" to true, "cached" to false, "boot_id" to bootId)
+        }
+        useFridaPolicyLoad()
+        val error = result.text.trim().ifEmpty { "ksud exited with ${result.exitCode}" }
+        AppLog.warn("Frida: KernelSU 规则应用失败，回退到 Frida 自行加载策略：$error")
+        return jsonObject(
+            "mode" to "compat",
+            "applied" to false,
+            "error" to error,
+            "hint" to "Rules were not applied; frida-inject reloads the SELinux policy before attaching."
         )
     }
 
@@ -185,12 +299,17 @@ class FridaManager private constructor(private val context: Context) {
         ensureArm64()
         val force = args.optBoolean("force", false)
         ensureInstalled(force)
-        AppLog.info("Frida: 运行时就绪（$VERSION）")
+        if (args.has("selinux_mode")) {
+            ServerConfig.setFridaSelinuxMode(appContext, args.getString("selinux_mode"))
+        }
+        val selinux = prepareSelinux(force = true)
+        AppLog.info("Frida: 运行时就绪（$VERSION），SELinux 模式 ${selinux.optString("mode")}")
         return jsonObject(
             "installed" to true,
             "version" to VERSION,
             "binary" to BINARY,
             "sessions_dir" to SESSIONS_DIR,
+            "selinux" to selinux,
             "hint" to "Call android_frida_run with a package and a JavaScript source to start a session."
         )
     }
@@ -217,6 +336,7 @@ class FridaManager private constructor(private val context: Context) {
 
         ensureArm64()
         ensureInstalled(false)
+        prepareSelinux()
         installedApp(pkg)
         if (restart) manualStarts[pkg] = System.currentTimeMillis()
 
@@ -271,10 +391,21 @@ class FridaManager private constructor(private val context: Context) {
             val failure = when {
                 chunk.text.contains("backend_class != null") -> "frida_helper_failed"
                 chunk.text.contains("Unable to save SELinux policy") ||
-                    chunk.text.contains("Unable to load SELinux policy") -> "selinux_patch_failed"
+                    chunk.text.contains("Unable to load SELinux policy") ||
+                    chunk.text.contains("SELinux rule probably missing") ||
+                    chunk.text.contains("execmem") -> "selinux_patch_failed"
                 chunk.text.contains("Timeout was reached") -> "frida_timeout"
                 result.optInt("exit_code", 0) != 0 -> "injector_exited"
                 else -> null
+            }
+            if (failure == "selinux_patch_failed") {
+                result.put(
+                    "hint",
+                    "frida-inject could not attach under the current SELinux policy. In KSU mode the rules are " +
+                        "applied by `ksud sepolicy apply`; check that KernelSU is active and call " +
+                        "android_frida_prepare again (selinux_mode=ksu), or switch to selinux_mode=compat to let " +
+                        "frida-inject reload the policy itself."
+                )
             }
             if (failure != null) result.put("error", failure)
             return result
@@ -525,6 +656,7 @@ class FridaManager private constructor(private val context: Context) {
         require(pkg != appContext.packageName) { "Cannot instrument Dex MCP itself" }
         ensureArm64()
         ensureInstalled(false)
+        prepareSelinux()
         val script = RootRunner.run("toybox cat '$AGENTS_DIR/$pkg.js' 2>/dev/null", 30_000).stdout
         require(script.isNotEmpty()) { "No startup script for $pkg" }
 
@@ -591,6 +723,7 @@ class FridaManager private constructor(private val context: Context) {
         var installed: String? = null
         var selinux = ""
         if (root) {
+            ensureSelinuxSafePaths()
             val probe = RootRunner.run(runtimeProbeCommand(), 30_000)
             val lines = probe.text.lines()
             size = lines.getOrNull(0)?.trim()?.toLongOrNull() ?: 0L
@@ -611,7 +744,9 @@ class FridaManager private constructor(private val context: Context) {
             "agent_scripts" to runCatching { agentScriptCount() }.getOrDefault(0),
             "sessions" to items.size,
             "running_sessions" to items.count { it.optBoolean("running") },
-            "selinux" to selinux
+            "selinux" to selinux,
+            "selinux_mode" to ServerConfig.fridaSelinuxMode(appContext),
+            "selinux_applied" to (selinuxPrepared?.optBoolean("applied") ?: false)
         )
     }
 
@@ -707,6 +842,7 @@ class FridaManager private constructor(private val context: Context) {
     }
 
     private fun launch(session: FridaSession, pid: Int?, forceAttach: Boolean = false) {
+        ensureSelinuxSafePaths()
         val target = when {
             session.mode == "spawn" && !forceAttach -> "-f ${session.packageName}"
             else -> {
@@ -962,6 +1098,7 @@ class FridaManager private constructor(private val context: Context) {
     }
 
     private fun installedVersion(): String? {
+        ensureSelinuxSafePaths()
         val result = RootRunner.run("[ -x '$BINARY' ] && '$BINARY' --version 2>/dev/null", 30_000)
         val value = result.text.trim().lines().firstOrNull()?.trim().orEmpty()
         return value.takeIf { it.matches(Regex("\\d+(\\.\\d+){1,3}")) }

@@ -156,8 +156,9 @@ class ToolRouter(private val context: Context) {
                 "limit" to integerSchema("Maximum hits, 1-300")
             ), listOf("workspace_id", "target")),
             tool("android_frida_status", "Check root, the bundled frida-inject version and active dynamic-analysis sessions.", emptyMap()),
-            tool("android_frida_prepare", "Extract the bundled arm64 frida-inject into /data/adb/dexmcp and verify it runs. Root is required.", mapOf(
-                "force" to booleanSchema("Reinstall even when the installed version already matches")
+            tool("android_frida_prepare", "Extract the bundled arm64 frida-inject into /data/adb/dexmcp, verify it runs, and apply Frida's SELinux rules (KernelSU ksud by default, no policy reload). Root is required.", mapOf(
+                "force" to booleanSchema("Reinstall even when the installed version already matches"),
+                "selinux_mode" to enumSchema("ksu", "compat")
             )),
             tool("android_frida_run", "Start dynamic analysis: optionally restart the target app, attach or spawn it with Frida and load a JavaScript file. Returns a session_id plus the first console output. Root is required. console.log output is captured; use Java.perform/Java.use for Java hooks.", mapOf(
                 "package" to stringSchema("Target package name"),
